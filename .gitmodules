@@ -1,0 +1,6 @@
+[submodule "include/OpenVision"]
+	path = include/OpenVision
+	url = git@github.com:UCSC-VLAA/OpenVision.git
+[submodule "include/diffusion_policy"]
+	path = include/diffusion_policy
+	url = git@github.com:real-stanford/diffusion_policy.git
