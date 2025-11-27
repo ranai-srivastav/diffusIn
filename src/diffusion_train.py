@@ -34,6 +34,7 @@ from diffusion_layers import (
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
 from diffusion_dataloaders import load_data
+from diffusion_inference import setup_env
 from transformers import CLIPModel, CLIPProcessor
 
 
@@ -51,11 +52,18 @@ DATASET_PATH = (
     else "DATASET IS AS LOST AS YOU ARE - NOT FOUND IN THE GIVEN PATH"
 )
 BATCH_SIZE = 16
-NUM_TRAIN_TIMESTEPS = 500
+NUM_TRAIN_TIMESTEPS = 100
 VISION_FEATURE_DIM = 512
 STATE_DIM = 14
 OBSERVATION_HORIZON = 8
 OBSERVATION_DIM = VISION_FEATURE_DIM + STATE_DIM
+ACTION_DIM = 16
+
+### Action space:      [left_arm_pose (7),             # position and quaternion for end effector
+###                         left_gripper_positions (1),    # normalized gripper position (0: close, 1: open)
+###                         right_arm_pose (7),            # position and quaternion for end effector
+###                         right_gripper_positions (1),]  # normalized gripper position (0: close, 1: open)
+# NOTE: action space doesn't include joint angles, only ee?
 
 
 ## Vision Encoder
@@ -121,28 +129,30 @@ class CLIPEncoder(VisionEncoder):
 
 ## Diffusion Model
 class DiffusionModel(torch.nn.Module):
-    def __init__(self):
+    def __init__(
+            self,
+            state_dim,
+            obs_dim,
+            obs_horizon,
+            action_dim,
+            vision_encoder,
+            device,):
         super().__init__()
-        self.vision_encoder = OpenVisionEncoder()
+        self.state_dim = state_dim
+        self.obs_dim = obs_dim
+        self.obs_horizon = obs_horizon
+        self.action_dim = action_dim
+        self.device = device
+
+        self.vision_encoder = vision_encoder
 
         self.noise_predictor = ConditionalUnet1D(
-            input_dim=STATE_DIM, 
-            global_cond_dim=OBSERVATION_DIM * OBSERVATION_HORIZON)
+            input_dim=state_dim, 
+            global_cond_dim=obs_dim * obs_horizon)
         
-        self.noise_scheduler = DDPMScheduler(
-            num_train_timesteps=NUM_TRAIN_TIMESTEPS,
-            # the choice of beta schedule has big impact on performance
-            # we found squared cosine works the best
-            beta_schedule="squaredcos_cap_v2",
-            # clip output to [-1,1] to improve stability
-            clip_sample=True,
-            # our network predicts noise (instead of denoised action)
-            prediction_type="epsilon",
-        )
+        self.to(device)
         
-    def forward(self, image, pos, action):
-        
-        #TODO cross-reference with TRI code to check correctness
+    def forward(self, image, pos, noisy_actions, timesteps):
         
         # Generating vision embedding
         image_preproc = self.vision_encoder.preprocess(image) # image preproc shape (B, obs_horizon, 3, 384, 384)
@@ -157,106 +167,268 @@ class DiffusionModel(torch.nn.Module):
         obs_cond = obs_features.flatten(start_dim=1)
         # (B, obs_horizon * obs_dim)
 
-        # sample noise to add to actions
-        noise = torch.randn(action.shape, device=DEVICE) #randn is random normal
-
-        # sample a diffusion iteration for each data point 
-        #NOTE: What is this step doing? ^That comment does not help
-        timesteps = torch.randint(
-            low=0,
-            high=self.noise_scheduler.config["num_train_timesteps"],  
-            size=(B,),
-            device=DEVICE,
-        ).long()
-
-        # add noise to the clean images according to the noise magnitude at each diffusion iteration
-        # (this is the forward diffusion process)
-        noisy_actions = self.noise_scheduler.add_noise(action, noise, timesteps)
-
         # predict the noise residual
         noise_pred = self.noise_predictor(
             noisy_actions, timesteps, global_cond=obs_cond
         )
         
-        return noise_pred, noise
+        return noise_pred
 
-## Dataset and Dataloader
-train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_data(
-    DATASET_PATH, NUM_EPISODES, ["top"], BATCH_SIZE, 1
-)
+## Trainer Class
+class TrainDiffusIn:
+    def __init__(
+            self,
+            model,
+            train_dataloader,
+            val_dataloader,
+            stats,
+            action_dim,
+            obs_horizon,
+            device,
+            diffusion_timesteps,
+            num_epochs,
+            ema_power=0.75,
+            ):
+        self.model = model
+        self.train_dataloader = train_dataloader
+        self.val_dataloader = val_dataloader
+        self.stats = stats
+        self.action_dim = action_dim
+        self.obs_horizon = obs_horizon
+        self.device = device
+        self.num_epochs = num_epochs
+        self.diffusion_timesteps = diffusion_timesteps
 
-model = DiffusionModel().to(device=DEVICE)
+        ## Exponential Moving Average improves Training Stability
+        self.ema = EMAModel(parameters=model.parameters(), power=ema_power)
 
-## Exponential Moving Average improves Training Stability
-ema = EMAModel(parameters=model.parameters(), power=0.75)
+        # Standard ADAM optimizer
+        # Note that EMA parameters are not optimized
+        self.optimizer = torch.optim.AdamW(params=model.parameters(), lr=1e-4, weight_decay=1e-6)
 
-# Standard ADAM optimizer
-# Note that EMA parameters are not optimized
-optimizer = torch.optim.AdamW(params=model.parameters(), lr=1e-4, weight_decay=1e-6)
+        # Cosine LR schedule with linear warmup
+        self.lr_scheduler = get_scheduler(
+            name="cosine",
+            optimizer=self.optimizer,
+            num_warmup_steps=500,
+            num_training_steps=len(train_dataloader) * self.num_epochs,
+        )
 
-# Cosine LR schedule with linear warmup
-lr_scheduler = get_scheduler(
-    name="cosine",
-    optimizer=optimizer,
-    num_warmup_steps=500,
-    num_training_steps=len(train_dataloader) * NUM_EPOCHS,
-)
+        self.noise_scheduler = DDPMScheduler(
+            num_train_timesteps=diffusion_timesteps,
+            # the choice of beta schedule has big impact on performance
+            # we found squared cosine works the best
+            beta_schedule='squaredcos_cap_v2',
+            # clip output to [-1,1] to improve stability
+            clip_sample=True,
+            # our network predicts noise (instead of denoised action)
+            prediction_type='epsilon'
+        )
 
-# L2 loss
-loss = torch.nn.MSELoss()
+        # L2 loss
+        self.loss_fn = torch.nn.MSELoss()
+
+    def train(self):
+        """ Training Loop for Diffusion Model """
+        with tqdm(range(self.num_epochs), desc="Epoch") as t_global:
+            # epoch loop
+            for epoch_idx in t_global:
+                epoch_loss = list()
+                # batch loop
+                with tqdm(self.train_dataloader, desc="Batch", leave=False) as t_epoch:
+                    for nbatch in t_epoch:
+
+                        # device transfer
+                        # load a batch of data from expert trajectory: image, agent_pos, action
+                        nimage = nbatch["image"][:, :self.obs_horizon].to(self.device)
+                        nagent_pos = nbatch["agent_pos"][:, :self.obs_horizon].to(self.device)
+                        naction = nbatch["action"].to(self.device)
+                        B = nagent_pos.shape[0] # batch size
+
+                        # sample noise to add to actions
+                        noise = torch.randn(naction.shape, device=self.device) #randn is random normal
+                        # sample a diffusion iteration for each data point 
+                        #NOTE: What is this step doing? <- samples a random timestep to add noise up to. 
+                        # this teaches the model to denoise from any timestep. more efficient than training on all timesteps, 
+                        # because we know the mathematical relationship between any timestep in the diffusion process
+                        timesteps = torch.randint(
+                            low=0,
+                            high=self.noise_scheduler.config["num_train_timesteps"],  
+                            size=(B,),
+                            device=self.device,
+                        ).long()
+
+                        # add noise to the clean images according to the noise magnitude at each diffusion iteration
+                        # (this is the forward diffusion process)
+                        noisy_actions = self.noise_scheduler.add_noise(naction, noise, timesteps)
+
+                        # predict the noise
+                        noise_pred = self.model(nimage, nagent_pos, noisy_actions, timesteps)
+
+                        # calculate loss
+                        loss_val = self.loss_fn(noise_pred, noise)
+
+                        # optimize
+                        loss_val.backward()
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
+                        # step lr scheduler every batch
+                        # this is different from standard pytorch behavior #NOTE: Understand why they are doing so
+                        self.lr_scheduler.step()
+
+                        # update Exponential Moving Average of the model weights
+                        self.ema.step(self.model.parameters()) #NOTE: Understand why.
+
+                        # logging
+                        loss_cpu = loss_val.item()
+                        epoch_loss.append(loss_cpu)
+                        t_epoch.set_postfix(loss=loss_cpu)
+                t_global.set_postfix(loss=np.mean(epoch_loss))
+
+        # Weights of the EMA model
+        # is used for inference
+        self.ema_nets = self.model
+        self.ema.copy_to(self.ema_nets.parameters())
+
+        # TODO Save Model Checkpoint. This is GROSSLY INCORRECT <- why?
+        os.makedirs("data/diffusion_policy_models", exist_ok=True)
+        torch.save(
+            {
+                "model_state_dict": self.ema_nets.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
+            },
+            "data/diffusion_policy_models/diffusion_model_checkpoint.pth",
+        )
+
+    def eval(self, env, pred_horizon=16, action_horizon=8, max_steps=200): # default values taken from TRI example, should change
+        """ Evaluation Loop for Diffusion Model """
+        #|o|o|                             observations: 2
+        #| |a|a|a|a|a|a|a|a|               actions executed: 8
+        #|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p| actions predicted: 16
+
+        self.ema_nets.load_state_dict(torch.load(
+            "data/diffusion_policy_models/diffusion_model_checkpoint.pth"
+        )["model_state_dict"], map_location=self.device)
+
+        self.ema_nets.eval()
+
+        # TODO dataloader stuff to set up obs_deque
+
+        with tqdm(total=max_steps, desc="Eval SimInsertion") as pbar:
+            while not done:
+                B = 1
+                # stack the last obs_horizon number of observations
+                images = np.stack([x["image"] for x in obs_deque])
+                agent_poses = np.stack([x["agent_pos"] for x in obs_deque])
+
+                # normalize observation
+                nagent_poses = (agent_poses-self.stats["q_mean"]) / self.stats["q_std"]
+                # images are already normalized to [0,1]
+                nimages = images
+
+                # device transfer
+                nimages = torch.from_numpy(nimages).to(self.device, dtype=torch.float32)
+                # (2,3,96,96)
+                nagent_poses = torch.from_numpy(nagent_poses).to(
+                    self.device, dtype=torch.float32
+                )
+                # (2,2)
+
+                # infer action
+                with torch.no_grad():
+                    # TODO: pad data when len(obs_deque) < obs_horizon
+
+                    # initialize action from Guassian noise
+                    noisy_action = torch.randn((B, pred_horizon, self.action_dim), device=self.device)
+                    naction = noisy_action
+
+                    # init scheduler
+                    # NOTE: TRI example uses the same scheduler for training and inference. 
+                    # may consider using different schedulers, eg DDIM, or reference https://arxiv.org/pdf/2301.10677
+                    self.noise_scheduler.set_timesteps(self.diffusion_timesteps)
+
+                    # performs single diffusion sample from pure noise to denoised action sequence
+                    for k in self.noise_scheduler.timesteps:
+                        # predict noise
+                        noise_pred = self.ema_nets(nimages, nagent_poses, naction, k)
+
+                        # inverse diffusion step (remove noise)
+                        naction = self.noise_scheduler.step(
+                            model_output=noise_pred, timestep=k, sample=naction
+                        ).prev_sample
+
+                # unnormalize action
+                naction = naction.detach().to("cpu").numpy() # (B, pred_horizon, action_dim)
+                naction = naction[0]
+                action_pred = naction*self.stats["action_std"] + self.stats["action_mean"]
+
+                # only take action_horizon number of actions
+                start = self.obs_horizon - 1
+                end = start + action_horizon
+                action = action_pred[start:end, :]
+                # (action_horizon, action_dim)
+
+                # execute action_horizon number of steps
+                # without replanning
+                # TODO fix when we have env implemented
+                for i in range(len(action)):
+                    # stepping env
+                    obs, reward, done, _, info = env.step(action[i])
+                    # save observations
+                    obs_deque.append(obs)
+                    # and reward/vis
+                    rewards.append(reward)
+                    imgs.append(env.render(mode="rgb_array"))
+
+                    # update progress bar
+                    step_idx += 1
+                    pbar.update(1)
+                    pbar.set_postfix(reward=reward)
+                    if step_idx > max_steps:
+                        done = True
+                    if done:
+                        break
+
+        # print out the maximum target coverage
+        print("Score: ", max(rewards))
+
+        # visualize
+        from IPython.display import Video
+
+        vwrite("vis.mp4", imgs)
+        Video("vis.mp4", embed=True, width=256, height=256)
+
 
 # print(summary(model, 
 #         torch.zeros((BATCH_SIZE, OBSERVATION_HORIZON, 3, 64, 64), device=DEVICE), 
 #         torch.zeros((BATCH_SIZE, OBSERVATION_HORIZON, 2), device=DEVICE), 
 #         torch.zeros((BATCH_SIZE, STATE_DIM), device=DEVICE)))
 
-## THE TRAINING LOOP
-with tqdm(range(NUM_EPOCHS), desc="Epoch") as t_global:
-    # epoch loop
-    for epoch_idx in t_global:
-        epoch_loss = list()
-        # batch loop
-        with tqdm(train_dataloader, desc="Batch", leave=False) as t_epoch:
-            for nbatch in t_epoch:
+if __name__ == "__main__":
+    vision_encoder = OpenVisionEncoder().to(device=DEVICE)
+    model = DiffusionModel(
+        state_dim=STATE_DIM,
+        obs_dim=OBSERVATION_DIM,
+        obs_horizon=OBSERVATION_HORIZON,
+        vision_encoder=vision_encoder,
+        device=DEVICE,)
+    ## Dataset and Dataloader
+    train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_data(
+        DATASET_PATH, NUM_EPISODES, ["top"], BATCH_SIZE, 1
+    )
+    trainer = TrainDiffusIn(
+        model=model,
+        train_dataloader=train_dataloader,
+        val_dataloader=val_dataloader,
+        stats=norm_dataset_stats,
+        action_dim=ACTION_DIM,
+        obs_horizon=OBSERVATION_HORIZON,
+        device=DEVICE,
+        diffusion_timesteps=NUM_TRAIN_TIMESTEPS,
+        num_epochs=NUM_EPOCHS,
+    )
+    trainer.train()
 
-                # device transfer
-                nimage = nbatch["image"][:, :OBSERVATION_HORIZON].to(DEVICE)
-                nagent_pos = nbatch["agent_pos"][:, :OBSERVATION_HORIZON].to(DEVICE)
-                naction = nbatch["action"].to(DEVICE)
-                B = nagent_pos.shape[0]
-
-                noise_pred, noise = model(nimage, nagent_pos, naction)
-
-                loss_val = loss(noise_pred, noise)
-
-                # optimize
-                loss_val.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-                # step lr scheduler every batch
-                # this is different from standard pytorch behavior #NOTE: Understand why they are doing so
-                lr_scheduler.step()
-
-                # update Exponential Moving Average of the model weights
-                ema.step(model.parameters()) #NOTE: Understand why.
-
-                # logging
-                loss_cpu = loss_val.item()
-                epoch_loss.append(loss_cpu)
-                t_epoch.set_postfix(loss=loss_cpu)
-        t_global.set_postfix(loss=np.mean(epoch_loss))
-
-# Weights of the EMA model
-# is used for inference
-ema_nets = model
-ema.copy_to(ema_nets.parameters())
-
-# TODO Save Model Checkpoint. This is GROSSLY INCORRECT
-torch.save(
-    {
-        "model_state_dict": ema_nets.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "lr_scheduler_state_dict": lr_scheduler.state_dict(),
-    },
-    "diffusion_model_checkpoint.pth",
-)
+    env, curr_render = setup_env()  # TODO set up mujoco env for eval
+    trainer.eval(env)
