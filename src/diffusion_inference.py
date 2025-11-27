@@ -35,10 +35,9 @@ from torch.utils.data import DataLoader
 ## Torch Params
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
 ## Configure params according to inference
 NUM_EPOCHS = 100
-NUM_EPISODES = 100
+NUM_EPISODES = 1
 DATASET_PATH = Path("../data").absolute()
 DATASET_PATH = (
     DATASET_PATH
