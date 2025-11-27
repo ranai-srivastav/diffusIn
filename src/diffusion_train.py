@@ -53,7 +53,7 @@ DATASET_PATH = (
 )
 BATCH_SIZE = 16
 NUM_TRAIN_TIMESTEPS = 100
-VISION_FEATURE_DIM = 512
+VISION_FEATURE_DIM = 192
 STATE_DIM = 14
 OBSERVATION_HORIZON = 8
 OBSERVATION_DIM = VISION_FEATURE_DIM + STATE_DIM
@@ -146,7 +146,7 @@ class DiffusionModel(torch.nn.Module):
         self.vision_encoder = vision_encoder
 
         self.noise_predictor = ConditionalUnet1D(
-            input_dim=state_dim, 
+            input_dim=obs_dim, 
             global_cond_dim=obs_dim * obs_horizon)
         
         self.to(device)
