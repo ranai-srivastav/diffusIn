@@ -57,13 +57,12 @@ VISION_FEATURE_DIM = 512
 STATE_DIM = 14
 OBSERVATION_HORIZON = 8
 OBSERVATION_DIM = VISION_FEATURE_DIM + STATE_DIM
-ACTION_DIM = 16
+ACTION_DIM = 14
 
-### Action space:      [left_arm_pose (7),             # position and quaternion for end effector
-###                         left_gripper_positions (1),    # normalized gripper position (0: close, 1: open)
-###                         right_arm_pose (7),            # position and quaternion for end effector
-###                         right_gripper_positions (1),]  # normalized gripper position (0: close, 1: open)
-# NOTE: action space doesn't include joint angles, only ee?
+# Action space:      [left_arm_qpos (6),             # absolute joint position
+#                         left_gripper_positions (1),    # normalized gripper position (0: close, 1: open)
+#                         right_arm_qpos (6),            # absolute joint position
+#                         right_gripper_positions (1),]  # normalized gripper position (0: close, 1: open)
 
 
 ## Vision Encoder
