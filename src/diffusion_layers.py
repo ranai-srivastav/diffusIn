@@ -112,7 +112,7 @@ class ConditionalResidualBlock1D(nn.Module):
 class ConditionalUnet1D(nn.Module):
     def __init__(
         self,
-        input_dim,
+        action_dim,
         global_cond_dim,
         diffusion_step_embed_dim=256,
         down_dims=[256, 512, 1024],
@@ -120,7 +120,7 @@ class ConditionalUnet1D(nn.Module):
         n_groups=8,
     ):
         """
-        input_dim: Dim of actions.
+        action_dim: Dim of actions.
         global_cond_dim: Dim of global conditioning applied with FiLM
           in addition to diffusion step embedding. This is usually obs_horizon * obs_dim
         diffusion_step_embed_dim: Size of positional encoding for diffusion iteration k
@@ -131,7 +131,7 @@ class ConditionalUnet1D(nn.Module):
         """
 
         super().__init__()
-        all_dims = [input_dim] + list(down_dims)
+        all_dims = [action_dim] + list(down_dims)
         start_dim = down_dims[0]
 
         dsed = diffusion_step_embed_dim
@@ -216,7 +216,7 @@ class ConditionalUnet1D(nn.Module):
 
         final_conv = nn.Sequential(
             Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
-            nn.Conv1d(start_dim, input_dim, 1),
+            nn.Conv1d(start_dim, action_dim, 1),
         )
 
         self.diffusion_step_encoder = diffusion_step_encoder

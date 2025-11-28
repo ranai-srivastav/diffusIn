@@ -106,7 +106,7 @@ class OpenVisionEncoder(VisionEncoder):
         return tensor_conv(image)
 
     def forward(self, image: torch.Tensor):
-        return self.vision_encoder(torch.unsqueeze(image, 0))  # Adding batch dimension
+        return self.vision_encoder(image)  # Adding batch dimension
 
 
 class CLIPEncoder(VisionEncoder):
@@ -133,6 +133,7 @@ class DiffusionModel(torch.nn.Module):
             self,
             state_dim,
             obs_dim,
+            action_dim,
             obs_horizon,
             vision_encoder,
             device,):
@@ -145,7 +146,7 @@ class DiffusionModel(torch.nn.Module):
         self.vision_encoder = vision_encoder
 
         self.noise_predictor = ConditionalUnet1D(
-            input_dim=obs_dim, 
+            action_dim=action_dim, 
             global_cond_dim=obs_dim * obs_horizon)
         
         self.to(device)
@@ -167,6 +168,7 @@ class DiffusionModel(torch.nn.Module):
         # (B, obs_horizon * obs_dim)
 
         # predict the noise residual
+        #TODO: obs history should be passed instead of episode time noisy actions
         noise_pred = self.noise_predictor(
             noisy_actions, timesteps, global_cond=obs_cond
         )
@@ -241,7 +243,7 @@ class TrainDiffusIn:
                         # load a batch of data from expert trajectory: image, agent_pos, action
                         nimage = nbatch["image"][:, :self.obs_horizon].to(self.device)
                         nagent_pos = nbatch["q_pos"][:, :self.obs_horizon].to(self.device)
-                        naction = nbatch["action"].to(self.device)
+                        naction = nbatch["action"][:, :self.obs_horizon].to(self.device)
                         B = nagent_pos.shape[0] # batch size
 
                         # sample noise to add to actions
@@ -409,6 +411,7 @@ if __name__ == "__main__":
     model = DiffusionModel(
         state_dim=STATE_DIM,
         obs_dim=OBSERVATION_DIM,
+        action_dim=ACTION_DIM,
         obs_horizon=OBSERVATION_HORIZON,
         vision_encoder=vision_encoder,
         device=DEVICE,)
