@@ -8,7 +8,7 @@ sys.path.extend(
 )
 import numpy as np
 from tqdm import tqdm
-from torchsummaryX import summary
+from torchsummary import summary
 
 ## Encoder Dependencies
 from torchvision.transforms.v2 import Compose, Resize, ToTensor, Normalize
@@ -44,14 +44,14 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 ## Tunable Params
 NUM_EPOCHS = 100
-NUM_EPISODES = 1
+NUM_EPISODES = 5
 DATASET_PATH = Path("data").absolute()
 DATASET_PATH = (
     DATASET_PATH
     if DATASET_PATH.exists()
     else "DATASET IS AS LOST AS YOU ARE - NOT FOUND IN THE GIVEN PATH"
 )
-BATCH_SIZE = 16
+BATCH_SIZE = 1
 NUM_TRAIN_TIMESTEPS = 100
 VISION_FEATURE_DIM = 192
 STATE_DIM = 14
@@ -90,11 +90,12 @@ class OpenVisionEncoder(VisionEncoder):
         )
 
     def preprocess(self, image: Image.Image):
-        image = image.convert("RGB")
+        # image = image.convert("RGB")
         tensor_conv = Compose(
             [
                 Resize((384, 384)),
-                ToTensor(),
+                # ToTensor(),
+                # TODO: Check how normalize was supposed to be used, the range of inputs gers changed to [-1.8,2.2] after this step
                 Normalize(
                     mean=[0.48145466, 0.4578275, 0.40821073],
                     std=[0.26862954, 0.26130258, 0.27577711],
@@ -133,14 +134,12 @@ class DiffusionModel(torch.nn.Module):
             state_dim,
             obs_dim,
             obs_horizon,
-            action_dim,
             vision_encoder,
             device,):
         super().__init__()
         self.state_dim = state_dim
         self.obs_dim = obs_dim
         self.obs_horizon = obs_horizon
-        self.action_dim = action_dim
         self.device = device
 
         self.vision_encoder = vision_encoder
@@ -155,14 +154,15 @@ class DiffusionModel(torch.nn.Module):
         
         # Generating vision embedding
         image_preproc = self.vision_encoder.preprocess(image) # image preproc shape (B, obs_horizon, 3, 384, 384)
-        image_features = self.vision_encoder(image_preproc.flatten(end_dim=1))
-        image_features = image_features.reshape(*image_preproc.shape[:2], -1)
+        image_features = self.vision_encoder(image_preproc.flatten(end_dim=1)) # Shape of image features: B * obs_horizon, D
+        image_features = image_features.reshape(*image_preproc.shape[:2], -1) # Shape of image features flattened: B, obs_horizon, D
         # vision embedding shape (B, obs_horizon, D)
 
         #TODO image embeddings are currently of dim 192 but the Conv1D expects `input_dim`. Need to align
         
         # concatenate vision feature and agent positions
-        obs_features = torch.cat([image_features, pos], dim=-1)
+        # TODO:Agent positions need to be raw inputs or embeddings?
+        obs_features = torch.cat([image_features, pos], dim=-1) # D -> D + state_dim = obs_dim
         obs_cond = obs_features.flatten(start_dim=1)
         # (B, obs_horizon * obs_dim)
 
@@ -240,7 +240,7 @@ class TrainDiffusIn:
                         # device transfer
                         # load a batch of data from expert trajectory: image, agent_pos, action
                         nimage = nbatch["image"][:, :self.obs_horizon].to(self.device)
-                        nagent_pos = nbatch["agent_pos"][:, :self.obs_horizon].to(self.device)
+                        nagent_pos = nbatch["q_pos"][:, :self.obs_horizon].to(self.device)
                         naction = nbatch["action"].to(self.device)
                         B = nagent_pos.shape[0] # batch size
 
@@ -413,6 +413,7 @@ if __name__ == "__main__":
         vision_encoder=vision_encoder,
         device=DEVICE,)
     ## Dataset and Dataloader
+    # NOTE: Cannot pass num_episodes = 1 because train/val split fails
     train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_data(
         DATASET_PATH, NUM_EPISODES, ["top"], BATCH_SIZE, 1
     )

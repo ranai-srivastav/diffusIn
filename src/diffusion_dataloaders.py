@@ -23,8 +23,6 @@ class EpisodicDataset(torch.utils.data.Dataset):
         self.camera_names = camera_names
         self.norm_stats = norm_stats
         self.is_sim = None
-        #TODO Crashes here for @ranais. 
-        self.__getitem__(0) # initialize self.is_sim
 
     def __len__(self):
         return len(self.episode_ids)
@@ -52,13 +50,27 @@ class EpisodicDataset(torch.utils.data.Dataset):
         # channel last
         image_data = torch.einsum('k h w c -> k c h w', image_data)
 
+        # Fixed: Properly indexing q_mean and q_std to separate qpos and qvel
+        qpos_mean = self.norm_stats["q_mean"][0]
+        qvel_mean = self.norm_stats["q_mean"][1]
+        qpos_std = self.norm_stats["q_std"][0]
+        qvel_std = self.norm_stats["q_std"][1]
+
         # normalize image and change dtype to float
+        #TODO: Check if range between 0 to 1 is needed based on vision encoder
         image_data = image_data / 255.0
         action_data = (action_data - self.norm_stats["action_mean"]) / self.norm_stats["action_std"]
-        qpos_data = (qpos_data - self.norm_stats["qpos_mean"]) / self.norm_stats["qpos_std"]
-        qvel_data = (qvel_data - self.norm_stats["qvel_mean"]) / self.norm_stats["qvel_std"]
+        qpos_data = (qpos_data - qpos_mean) / qpos_std
+        qvel_data = (qvel_data - qvel_mean) / qvel_std
 
-        return image_data, qpos_data, qvel_data, action_data
+        values = {
+            "image": image_data,
+            "q_pos": qpos_data,
+            "q_vel": qvel_data,
+            "action": action_data
+        }
+
+        return values
 
 
 def get_norm_stats(dataset_dir, num_episodes):
@@ -77,6 +89,8 @@ def get_norm_stats(dataset_dir, num_episodes):
         all_qpos_data.append(torch.from_numpy(qpos))
         all_action_data.append(torch.from_numpy(action))
         all_qvel_data.append(torch.from_numpy(qvel))
+    
+    # stack all data
     all_qpos_data = torch.stack(all_qpos_data)
     all_action_data = torch.stack(all_action_data)
     all_qvel_data = torch.stack(all_qvel_data)
@@ -116,6 +130,7 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     norm_stats = get_norm_stats(dataset_dir, num_episodes)
 
     # construct dataset and dataloader
+    assert num_episodes > 1, "num_episodes must be greater than 1 to perform train/val split."
     train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats)
     val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
