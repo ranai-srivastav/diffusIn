@@ -44,7 +44,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 ## Tunable Params
 NUM_EPOCHS = 100
-NUM_EPISODES = 5
+NUM_EPISODES = 100
 DATASET_PATH = Path("data").absolute()
 DATASET_PATH = (
     DATASET_PATH
