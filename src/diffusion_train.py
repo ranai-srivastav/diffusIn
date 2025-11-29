@@ -57,6 +57,7 @@ DATASET_PATH = (
     if DATASET_PATH.exists()
     else "DATASET IS AS LOST AS YOU ARE - NOT FOUND IN THE GIVEN PATH"
 )
+FILES_OUTPUT_PATH = Path("data/diffusion_policy_models").absolute()
 BATCH_SIZE = 1
 NUM_TRAIN_TIMESTEPS = 100
 VISION_FEATURE_DIM = 192
@@ -254,6 +255,8 @@ class TrainDiffusIn:
 
     def train(self):
         """ Training Loop for Diffusion Model """
+        
+        least_val_loss = float("inf")
         with tqdm(range(self.num_epochs), desc="Epoch") as t_global:
             # epoch loop
             for epoch_idx in t_global:
@@ -342,8 +345,23 @@ class TrainDiffusIn:
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
             },
-            "data/diffusion_policy_models/diffusion_model_checkpoint.pth",
+            f"{FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth",
         )
+        
+        if least_val_loss < loss_cpu:
+            least_val_loss = loss_cpu
+            torch.save(
+                {
+                    "model_state_dict": self.ema_nets.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
+                },
+                f"{FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth",
+            )
+            
+    for wandb_file in os.listdir(FILES_OUTPUT_PATH):
+        wandb.save(f"{FILES_OUTPUT_PATH}/{wandb_file}")
+        
 
     def eval(self, env, pred_horizon=16, max_steps=500, render=False): # default values taken from TRI example, should change
         """ Evaluation Loop for Diffusion Model """
