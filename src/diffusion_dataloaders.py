@@ -60,10 +60,10 @@ class EpisodicDataset(torch.utils.data.Dataset):
         image_data = torch.einsum('k h w c -> k c h w', image_data)
 
         # Fixed: Properly indexing q_mean and q_std to separate qpos and qvel
-        qpos_mean = self.norm_stats["q_mean"][0]
-        qvel_mean = self.norm_stats["q_mean"][1]
-        qpos_std = self.norm_stats["q_std"][0]
-        qvel_std = self.norm_stats["q_std"][1]
+        qpos_mean = self.norm_stats["qpos_mean"]
+        qvel_mean = self.norm_stats["qvel_mean"]
+        qpos_std = self.norm_stats["qpos_std"]
+        qvel_std = self.norm_stats["qvel_std"]
 
         # normalize image and change dtype to float
         #TODO: Check if range between 0 to 1 is needed based on vision encoder

@@ -55,7 +55,7 @@ DATASET_PATH = (
     if DATASET_PATH.exists()
     else "DATASET IS AS LOST AS YOU ARE - NOT FOUND IN THE GIVEN PATH"
 )
-BATCH_SIZE = 4
+BATCH_SIZE = 1
 NUM_TRAIN_TIMESTEPS = 100
 VISION_FEATURE_DIM = 192
 STATE_DIM = 14
@@ -250,6 +250,7 @@ class TrainDiffusIn:
                         start_index_action = end_index_obs
                         end_index_action = start_index_action + self.action_horizon
                         assert end_index_action < nbatch["action"].shape[1], "end_index_action exceeds episode length!" # sanity check
+                        # print(start_index_action, end_index_action, start_index_obs, end_index_obs)
 
                         # device transfer
                         # load a batch of data from expert trajectory: image, agent_pos, action
