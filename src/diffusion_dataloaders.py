@@ -1,8 +1,9 @@
-import numpy as np
-import torch
 import os
+import numpy as np
+import glob
 import h5py
-from torch.utils.data import TensorDataset, DataLoader
+import torch
+from torch.utils.data import DataLoader
 
 import IPython
 e = IPython.embed
@@ -12,7 +13,6 @@ class EpisodicDataset(torch.utils.data.Dataset):
         """Dataset class that we will use to read with ACT MuJoCo sim
 
         Args:
-            episode_ids (dict): {Episode index when loaded numerically: The name of the corresponding file}
             dataset_dir (str): Directory where the dataset files are stored
             camera_names (list): List of camera names to load images from, "top" only in our case
             norm_stats (dict): Normalization statistics for observations and actions
@@ -24,13 +24,22 @@ class EpisodicDataset(torch.utils.data.Dataset):
         self.norm_stats = norm_stats
         self.is_sim = None
 
+        # get episode paths
+        human_episodes = sorted(
+            glob.glob(os.path.join(dataset_dir, "sim_insertion_human", "*.hdf5"))
+        )
+        scripted_episodes = sorted(
+            glob.glob(os.path.join(dataset_dir, "sim_insertion_scripted", "*.hdf5"))
+        )
+        all_episode_paths = human_episodes + scripted_episodes
+        self.episode_paths = [all_episode_paths[i] for i in episode_ids]
+
     def __len__(self):
         return len(self.episode_ids)
 
     def __getitem__(self, index):
-        
-        dataset_path = os.path.join(self.dataset_dir, f'episode_{index}.hdf5')
-        with h5py.File(dataset_path, 'r') as root:
+        episode_path = self.episode_paths[index]
+        with h5py.File(episode_path, 'r') as root:
             is_sim = root.attrs['sim']
             original_action_shape = root['/action'].shape
             episode_len = original_action_shape[0]
@@ -73,41 +82,50 @@ class EpisodicDataset(torch.utils.data.Dataset):
         return values
 
 
-def get_norm_stats(dataset_dir, num_episodes):
+def get_norm_stats(dataset_dir, episode_ids):
     all_qpos_data = []
     all_action_data = []
     all_qvel_data = []
-    
-    for episode_idx in range(num_episodes):
-        dataset_path = os.path.join(dataset_dir, f'episode_{episode_idx}.hdf5')
-        with h5py.File(dataset_path, 'r') as root:
+
+    # get episode paths
+    episode_paths = []
+    human_episodes = sorted(
+        glob.glob(os.path.join(dataset_dir, "sim_insertion_human", "*.hdf5"))
+    )
+    scripted_episodes = sorted(
+        glob.glob(os.path.join(dataset_dir, "sim_insertion_scripted", "*.hdf5"))
+    )
+    episode_paths = human_episodes + scripted_episodes
+    selected_episode_paths = [episode_paths[i] for i in episode_ids]
+        
+    for path in selected_episode_paths:
+        with h5py.File(path, 'r') as root:
             qpos = np.array(root['/observations/qpos'])
             qvel = np.array(root['/observations/qvel'])
-            images = np.array(root['/observations/images/top'])
             action = np.array(root['/action'])
-            
+
         all_qpos_data.append(torch.from_numpy(qpos))
         all_action_data.append(torch.from_numpy(action))
         all_qvel_data.append(torch.from_numpy(qvel))
     
-    # stack all data
-    all_qpos_data = torch.stack(all_qpos_data)
-    all_action_data = torch.stack(all_action_data)
-    all_qvel_data = torch.stack(all_qvel_data)
+    # concatenate along time dimension to handle variable-length episodes
+    all_qpos_data = torch.cat(all_qpos_data, dim=0)      # (sum_T, qpos_dim)
+    all_action_data = torch.cat(all_action_data, dim=0)  # (sum_T, action_dim)
+    all_qvel_data = torch.cat(all_qvel_data, dim=0)      # (sum_T, qvel_dim)
 
     # normalize action data
-    action_mean = all_action_data.mean(dim=[0, 1], keepdim=True)
-    action_std = all_action_data.std(dim=[0, 1], keepdim=True)
+    action_mean = all_action_data.mean(dim=[0], keepdim=True)
+    action_std = all_action_data.std(dim=[0], keepdim=True)
     action_std = torch.clip(action_std, 1e-2, np.inf) # clipping
 
     # normalize qpos data
-    qpos_mean = all_qpos_data.mean(dim=[0, 1], keepdim=True)
-    qpos_std = all_qpos_data.std(dim=[0, 1], keepdim=True)
+    qpos_mean = all_qpos_data.mean(dim=[0], keepdim=True)
+    qpos_std = all_qpos_data.std(dim=[0], keepdim=True)
     qpos_std = torch.clip(qpos_std, 1e-2, np.inf) # clipping
     
     # normalize qvel data
-    qvel_mean = all_qvel_data.mean(dim=[0, 1], keepdim=True)
-    qvel_std = all_qvel_data.std(dim=[0, 1], keepdim=True)
+    qvel_mean = all_qvel_data.mean(dim=[0], keepdim=True)
+    qvel_std = all_qvel_data.std(dim=[0], keepdim=True)
     qvel_std = torch.clip(qvel_std, 1e-2, np.inf) # clipping
 
     stats = {"action_mean": action_mean.numpy().squeeze(), "action_std": action_std.numpy().squeeze(),
@@ -127,7 +145,8 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     val_indices = shuffled_indices[int(train_ratio * num_episodes):]
 
     # obtain normalization stats for qpos and action
-    norm_stats = get_norm_stats(dataset_dir, num_episodes)
+    # BUGFIX: Data leakage. Need to look at train data only to get normalization stats
+    norm_stats = get_norm_stats(dataset_dir, train_indices)
 
     # construct dataset and dataloader
     assert num_episodes > 1, "num_episodes must be greater than 1 to perform train/val split."
