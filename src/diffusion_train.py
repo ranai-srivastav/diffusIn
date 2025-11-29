@@ -1,4 +1,5 @@
 import os, sys
+import collections
 
 from pathlib import Path
 sys.path.extend(
@@ -36,6 +37,9 @@ from diffusers.optimization import get_scheduler
 from diffusion_dataloaders import load_data
 from diffusion_inference import setup_env
 from transformers import CLIPModel, CLIPProcessor
+
+# Env dependencies
+import act.sim_env as act_sim_env
 
 
 ## Torch Params
@@ -160,8 +164,6 @@ class DiffusionModel(torch.nn.Module):
         image_features = self.vision_encoder(image_preproc.flatten(end_dim=1)) # Shape of image features: B * obs_horizon, D
         image_features = image_features.reshape(*image_preproc.shape[:2], -1) # Shape of image features flattened: B, obs_horizon, D
         # vision embedding shape (B, obs_horizon, D)
-
-        #TODO image embeddings are currently of dim 192 but the Conv1D expects `input_dim`. Need to align
         
         # concatenate vision feature and agent positions
         # TODO:Agent positions need to be raw inputs or embeddings?
@@ -170,7 +172,6 @@ class DiffusionModel(torch.nn.Module):
         # (B, obs_horizon * obs_dim)
 
         # predict the noise residual
-        #TODO: obs history should be passed instead of episode time noisy actions
         noise_pred = self.noise_predictor(
             noisy_actions, timesteps, global_cond=obs_cond
         )
@@ -187,6 +188,7 @@ class TrainDiffusIn:
             stats,
             action_dim,
             obs_horizon,
+            action_horizon,
             device,
             diffusion_timesteps,
             num_epochs,
@@ -198,6 +200,7 @@ class TrainDiffusIn:
         self.stats = stats
         self.action_dim = action_dim
         self.obs_horizon = obs_horizon
+        self.action_horizon = action_horizon
         self.device = device
         self.num_epochs = num_epochs
         self.diffusion_timesteps = diffusion_timesteps
@@ -240,11 +243,17 @@ class TrainDiffusIn:
                 # batch loop
                 with tqdm(self.train_dataloader, desc="Batch", leave=False) as t_epoch:
                     for nbatch in t_epoch:
+                        end_index_obs = np.random.randint(self.obs_horizon, nbatch["image"].shape[1] - self.action_horizon)
+                        start_index_obs = end_index_obs - self.obs_horizon
+                        assert start_index_obs >= 0, "start_index_obs is negative!" # sanity check
+
+                        start_index_action = end_index_obs
+                        end_index_action = start_index_action + self.action_horizon
+                        assert end_index_action < nbatch["action"].shape[1], "end_index_action exceeds episode length!" # sanity check
 
                         # device transfer
                         # load a batch of data from expert trajectory: image, agent_pos, action
-                        nimage = nbatch["image"][:, :self.obs_horizon].to(self.device)
-
+                        nimage = nbatch["image"][:, start_index_obs:end_index_obs].to(self.device)
                         # Save images to visualize later if needed
                         if DEBUG:
                             for img_idx in range(nbatch["image"].shape[1]):
@@ -254,9 +263,8 @@ class TrainDiffusIn:
                                 os.makedirs("data/diffusion_training_vis", exist_ok=True)
                                 img_pil.save(f"data/diffusion_training_vis/epoch{epoch_idx}_img{img_idx}.png")
                         
-                        nagent_pos = nbatch["q_pos"][:, :self.obs_horizon].to(self.device)
-                        # naction = nbatch["action"][:, :self.obs_horizon].to(self.device)
-                        naction = nbatch["action"].to(self.device)
+                        nagent_pos = nbatch["q_pos"][:, start_index_obs:end_index_obs].to(self.device)
+                        naction = nbatch["action"][:, start_index_action:end_index_action].to(self.device)
                         B = nagent_pos.shape[0] # batch size
 
                         # sample noise to add to actions
@@ -315,7 +323,7 @@ class TrainDiffusIn:
             "data/diffusion_policy_models/diffusion_model_checkpoint.pth",
         )
 
-    def eval(self, env, pred_horizon=16, action_horizon=8, max_steps=200): # default values taken from TRI example, should change
+    def eval(self, env, pred_horizon=16, max_steps=500, render=False): # default values taken from TRI example, should change
         """ Evaluation Loop for Diffusion Model """
         #|o|o|                             observations: 2
         #| |a|a|a|a|a|a|a|a|               actions executed: 8
@@ -326,8 +334,19 @@ class TrainDiffusIn:
         )["model_state_dict"], map_location=self.device)
 
         self.ema_nets.eval()
+        obs, _ = env.reset()
 
-        # TODO dataloader stuff to set up obs_deque
+        obs_deque = collections.deque(
+            [obs] * self.obs_horizon, maxlen=self.obs_horizon
+        )
+
+        if render:
+            imgs = [env.render(mode="rgb_array")]
+        else:
+            imgs = []
+        rewards = []
+        done = False
+        step_idx = 0
 
         with tqdm(total=max_steps, desc="Eval SimInsertion") as pbar:
             while not done:
@@ -337,7 +356,7 @@ class TrainDiffusIn:
                 agent_poses = np.stack([x["agent_pos"] for x in obs_deque])
 
                 # normalize observation
-                nagent_poses = (agent_poses-self.stats["q_mean"]) / self.stats["q_std"]
+                nagent_poses = (agent_poses-self.stats["q_mean"]) / self.stats["q_std"] # TODO fix this, we are using only pos in state
                 # images are already normalized to [0,1]
                 nimages = images
 
@@ -351,8 +370,6 @@ class TrainDiffusIn:
 
                 # infer action
                 with torch.no_grad():
-                    # TODO: pad data when len(obs_deque) < obs_horizon
-
                     # initialize action from Guassian noise
                     noisy_action = torch.randn((B, pred_horizon, self.action_dim), device=self.device)
                     naction = noisy_action
@@ -379,7 +396,7 @@ class TrainDiffusIn:
 
                 # only take action_horizon number of actions
                 start = self.obs_horizon - 1
-                end = start + action_horizon
+                end = start + self.action_horizon
                 action = action_pred[start:end, :]
                 # (action_horizon, action_dim)
 
@@ -393,7 +410,9 @@ class TrainDiffusIn:
                     obs_deque.append(obs)
                     # and reward/vis
                     rewards.append(reward)
-                    imgs.append(env.render(mode="rgb_array"))
+
+                    if render:
+                        imgs.append(env.render(mode="rgb_array"))
 
                     # update progress bar
                     step_idx += 1
@@ -407,11 +426,12 @@ class TrainDiffusIn:
         # print out the maximum target coverage
         print("Score: ", max(rewards))
 
-        # visualize
-        from IPython.display import Video
+        if render:
+            # visualize
+            from IPython.display import Video
 
-        vwrite("vis.mp4", imgs)
-        Video("vis.mp4", embed=True, width=256, height=256)
+            vwrite("vis.mp4", imgs)
+            Video("vis.mp4", embed=True, width=256, height=256)
 
 
 # print(summary(model, 
@@ -440,11 +460,12 @@ if __name__ == "__main__":
         stats=norm_dataset_stats,
         action_dim=ACTION_DIM,
         obs_horizon=OBSERVATION_HORIZON,
+        action_horizon=ACTION_HORIZON,
         device=DEVICE,
         diffusion_timesteps=NUM_TRAIN_TIMESTEPS,
         num_epochs=NUM_EPOCHS,
     )
     trainer.train()
 
-    env, curr_render = setup_env()  # TODO set up mujoco env for eval
-    trainer.eval(env)
+    env = act_sim_env.make_sim_env("sim_insertion") 
+    trainer.eval(env, render=True)

@@ -51,11 +51,11 @@ STATE_DIM = 16
 OBSERVATION_HORIZON = 8
 OBSERVATION_DIM = VISION_FEATURE_DIM + STATE_DIM
 
-import act.ee_sim_env as act_sim_env
+import act.sim_env as act_sim_env
 
 
 def setup_env():
-    env = act_sim_env.make_ee_sim_env("sim_insertion")
+    env = act_sim_env.make_sim_env("sim_insertion")
     env.reset()
 
     # save visualization and rewards
