@@ -40,7 +40,7 @@ from transformers import CLIPModel, CLIPProcessor
 
 # Env dependencies
 import act.sim_env as act_sim_env
-
+import imageio
 
 ## Torch Params
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -356,7 +356,7 @@ class TrainDiffusIn:
                 agent_poses = np.stack([x["agent_pos"] for x in obs_deque])
 
                 # normalize observation
-                nagent_poses = (agent_poses-self.stats["q_mean"]) / self.stats["q_std"] # TODO fix this, we are using only pos in state
+                nagent_poses = (agent_poses-self.stats["qpos_mean"]) / self.stats["qpos_std"]
                 # images are already normalized to [0,1]
                 nimages = images
 
@@ -402,7 +402,6 @@ class TrainDiffusIn:
 
                 # execute action_horizon number of steps
                 # without replanning
-                # TODO fix when we have env implemented
                 for i in range(len(action)):
                     # stepping env
                     obs, reward, done, _, info = env.step(action[i])
@@ -427,11 +426,8 @@ class TrainDiffusIn:
         print("Score: ", max(rewards))
 
         if render:
-            # visualize
-            from IPython.display import Video
-
-            vwrite("vis.mp4", imgs)
-            Video("vis.mp4", embed=True, width=256, height=256)
+            # save vis as gif
+            imageio.mimsave(f'data/gifs_diffusion.gif', imgs, fps=33)
 
 
 # print(summary(model, 
