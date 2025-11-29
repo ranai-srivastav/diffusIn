@@ -230,8 +230,8 @@ class TrainDiffusIn:
         # Standard ADAM optimizer
         # Note that EMA parameters are not optimized
         self.optimizer = torch.optim.AdamW(params=[
-                {"params": model.vision_encoder.parameters(), "lr":4e-4},       # ViT was trained with 4e-3 LR
-                {"params": model.noise_predictor.parameters(), "lr":1e-4}],     
+                {"params": model.vision_encoder.parameters(), "lr":4e-4, "name":"vision_encoder"},       # ViT was trained with 4e-3 LR
+                {"params": model.noise_predictor.parameters(), "lr":1e-4, "name":"noise_predictor"}],     
             lr=1e-4, 
             weight_decay=1e-6)
 
@@ -256,6 +256,7 @@ class TrainDiffusIn:
 
         # L2 loss
         self.loss_fn = torch.nn.MSELoss()
+        self.loss_per_ep = {key:[] for key in range(NUM_EPISODES)}
 
     def train(self):
         """ Training Loop for Diffusion Model """
@@ -331,13 +332,16 @@ class TrainDiffusIn:
                         loss_cpu = loss_val.item()
                         epoch_loss.append(loss_cpu)
                         t_epoch.set_postfix(loss=loss_cpu)
+                        self.loss_per_ep[epoch_idx].append(loss_cpu)
                         wandb.log({"train/loss": loss_cpu})
-                        wandb.log({"train/lr": self.lr_scheduler.get_last_lr()[0]})
+                        wandb.log({"train/vision_lr": self.lr_scheduler.get_last_lr()[0]})
+                        wandb.log({"train/noise_lr": self.lr_scheduler.get_last_lr()[1]})
                         wandb.log({"train/epoch": epoch_idx})
+                        for traj_idx in range(self.num_episodes):
+                            wandb.log({f"traj/traj_{traj_idx}": self.loss_per_ep[traj_idx][-1]})
                         
                 t_global.set_postfix(loss=np.mean(epoch_loss))
-                wandb.log({"train/epoch_loss": np.mean(epoch_loss), 
-                           "epoch": epoch_idx})
+                wandb.log({"train/epoch_loss": np.mean(epoch_loss)})
 
         # Weights of the EMA model
         # is used for inference
