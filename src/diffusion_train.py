@@ -327,9 +327,6 @@ class TrainDiffusIn:
                                    "train/vision_lr": self.lr_scheduler.get_last_lr()[0],
                                    "train/noise_lr": self.lr_scheduler.get_last_lr()[1],
                                    "train/epoch": epoch_idx})
-                        
-                        for traj_idx in range(self.num_episodes):
-                            wandb.log({f"traj/traj_{traj_idx}": self.loss_per_ep[traj_idx][-1]})
 
                         # optimize
                         loss_val.backward()
@@ -345,6 +342,11 @@ class TrainDiffusIn:
                 t_global.set_postfix(loss=np.mean(epoch_loss))
                 wandb.log({"train/epoch_loss": np.mean(epoch_loss)})
                 
+                # Per trajectory loss over time
+                for traj_idx in range(NUM_EPISODES):
+                    wandb.log({f"traj/traj_{traj_idx}": self.loss_per_ep[traj_idx][-1]})
+                
+                # Save this model
                 os.makedirs("data/diffusion_policy_models", exist_ok=True)
                 torch.save(
                     {
@@ -356,6 +358,7 @@ class TrainDiffusIn:
                 )
                 print(f"Saved last_model_checkpoint at {FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth"),
                 
+                # Save this as the best model if validation loss improves
                 if least_val_loss < loss_cpu:
                     least_val_loss = loss_cpu
                     torch.save(
