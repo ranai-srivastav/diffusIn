@@ -2,10 +2,13 @@ import os, sys
 import collections
 
 from pathlib import Path
+
 sys.path.extend(
-    [str(Path("include").resolve()),
-     str(Path("include/act").resolve()),
-     str(Path("include/OpenVision").resolve())]
+    [
+        str(Path("include").resolve()),
+        str(Path("include/act").resolve()),
+        str(Path("include/OpenVision").resolve()),
+    ]
 )
 import numpy as np
 from tqdm import tqdm
@@ -42,15 +45,17 @@ import wandb
 
 # Env dependencies
 import act.sim_env as act_sim_env
+import act.utils as act_utils
 import imageio
 
 ## Torch Params
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = "cpu"
 
 
 ## Tunable Params
 NUM_EPOCHS = 100
-NUM_EPISODES = 2
+NUM_EPISODES = 100
 DATASET_PATH = Path("data").absolute()
 DATASET_PATH = (
     DATASET_PATH
@@ -66,6 +71,7 @@ OBSERVATION_HORIZON = 8
 OBSERVATION_DIM = VISION_FEATURE_DIM + STATE_DIM
 ACTION_DIM = 14
 ACTION_HORIZON = 8
+EXECUTION_HORIZON = 4
 DEBUG = False
 
 wandb.login()
@@ -155,13 +161,14 @@ class CLIPEncoder(VisionEncoder):
 ## Diffusion Model
 class DiffusionModel(torch.nn.Module):
     def __init__(
-            self,
-            state_dim,
-            obs_dim,
-            action_dim,
-            obs_horizon,
-            vision_encoder,
-            device,):
+        self,
+        state_dim,
+        obs_dim,
+        action_dim,
+        obs_horizon,
+        vision_encoder,
+        device,
+    ):
         super().__init__()
         self.state_dim = state_dim
         self.obs_dim = obs_dim
@@ -172,22 +179,30 @@ class DiffusionModel(torch.nn.Module):
 
         #TODO: What order does Conv!D exepect it in? Is it (B, C, L) or (B, L, C)?
         self.noise_predictor = ConditionalUnet1D(
-            action_dim=action_dim, 
-            global_cond_dim=obs_dim * obs_horizon)
-        
+            action_dim=action_dim, global_cond_dim=obs_dim * obs_horizon
+        )
+
         self.to(device)
-        
+
     def forward(self, image, pos, noisy_actions, timesteps):
-        
+
         # Generating vision embedding
-        image_preproc = self.vision_encoder.preprocess(image) # image preproc shape (B, obs_horizon, 3, 384, 384)
-        image_features = self.vision_encoder(image_preproc.flatten(end_dim=1)) # Shape of image features: B * obs_horizon, D
-        image_features = image_features.reshape(*image_preproc.shape[:2], -1) # Shape of image features flattened: B, obs_horizon, D
+        image_preproc = self.vision_encoder.preprocess(
+            image
+        )  # image preproc shape (B, obs_horizon, 3, 384, 384)
+        image_features = self.vision_encoder(
+            image_preproc.flatten(end_dim=1)
+        )  # Shape of image features: B * obs_horizon, D
+        image_features = image_features.reshape(
+            *image_preproc.shape[:2], -1
+        )  # Shape of image features flattened: B, obs_horizon, D
         # vision embedding shape (B, obs_horizon, D)
-        
+
         # concatenate vision feature and agent positions
         # TODO:Agent positions need to be raw inputs or embeddings?
-        obs_features = torch.cat([image_features, pos], dim=-1) # D -> D + state_dim = obs_dim
+        obs_features = torch.cat(
+            [image_features, pos], dim=-1
+        )  # D -> D + state_dim = obs_dim
         obs_cond = obs_features.flatten(start_dim=1)
         # (B, obs_horizon * obs_dim)
 
@@ -195,25 +210,27 @@ class DiffusionModel(torch.nn.Module):
         noise_pred = self.noise_predictor(
             noisy_actions, timesteps, global_cond=obs_cond
         )
-        
+
         return noise_pred
+
 
 ## Trainer Class
 class TrainDiffusIn:
     def __init__(
-            self,
-            model: DiffusionModel,
-            train_dataloader,
-            val_dataloader,
-            stats,
-            action_dim,
-            obs_horizon,
-            action_horizon,
-            device,
-            diffusion_timesteps,
-            num_epochs,
-            ema_power=0.75,
-            ):
+        self,
+        model: DiffusionModel,
+        train_dataloader,
+        val_dataloader,
+        stats,
+        action_dim,
+        obs_horizon,
+        action_horizon,
+        execution_horizon,
+        device,
+        diffusion_timesteps,
+        num_epochs,
+        ema_power=0.75,
+    ):
         self.model = model
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
@@ -221,6 +238,7 @@ class TrainDiffusIn:
         self.action_dim = action_dim
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
+        self.execution_horizon = execution_horizon
         self.device = device
         self.num_epochs = num_epochs
         self.diffusion_timesteps = diffusion_timesteps
@@ -233,7 +251,7 @@ class TrainDiffusIn:
         self.optimizer = torch.optim.AdamW(params=[
                 {"params": model.vision_encoder.parameters(), "lr":4e-4, "name":"vision_encoder"},       # ViT was trained with 4e-3 LR
                 {"params": model.noise_predictor.parameters(), "lr":1e-4, "name":"noise_predictor"}],     
-            lr=1e-4, 
+            lr=1e-4,
             weight_decay=1e-6)
 
         # Cosine LR schedule with linear warmup
@@ -248,11 +266,11 @@ class TrainDiffusIn:
             num_train_timesteps=diffusion_timesteps,
             # the choice of beta schedule has big impact on performance
             # we found squared cosine works the best
-            beta_schedule='squaredcos_cap_v2',
+            beta_schedule="squaredcos_cap_v2",
             # clip output to [-1,1] to improve stability
             clip_sample=True,
             # our network predicts noise (instead of denoised action)
-            prediction_type='epsilon'
+            prediction_type="epsilon",
         )
 
         # L2 loss
@@ -271,50 +289,84 @@ class TrainDiffusIn:
 
                 with tqdm(self.train_dataloader, desc="Batch", leave=False) as t_epoch:
                     for nbatch in t_epoch:
-                        end_index_obs = np.random.randint(self.obs_horizon, nbatch["image"].shape[1] - self.action_horizon)
+                        end_index_obs = np.random.randint(
+                            self.obs_horizon,
+                            nbatch["image"].shape[1] - self.action_horizon,
+                        )
                         start_index_obs = end_index_obs - self.obs_horizon
-                        assert start_index_obs >= 0, "start_index_obs is negative!" # sanity check
+                        assert (
+                            start_index_obs >= 0
+                        ), "start_index_obs is negative!"  # sanity check
 
                         start_index_action = end_index_obs
                         end_index_action = start_index_action + self.action_horizon
-                        assert end_index_action < nbatch["action"].shape[1], "end_index_action exceeds episode length!" # sanity check
+                        assert (
+                            end_index_action < nbatch["action"].shape[1]
+                        ), "end_index_action exceeds episode length!"  # sanity check
                         # print(start_index_action, end_index_action, start_index_obs, end_index_obs)
 
                         # device transfer
                         # load a batch of data from expert trajectory: image, agent_pos, action
-                        nimage = nbatch["image"][:, start_index_obs:end_index_obs].to(self.device)
+                        nimage = nbatch["image"][:, start_index_obs:end_index_obs].to(
+                            self.device
+                        )  # (batch_size, obs_horizon, 3, 480, 640)
                         # Save images to visualize later if needed
                         if DEBUG:
                             for img_idx in range(nbatch["image"].shape[1]):
-                                img = nbatch["image"][0, img_idx, :, :, :].detach().cpu().numpy()
-                                img = (img * 255).astype(np.uint8) # 3 x 480 x 640
-                                img_pil = Image.fromarray(np.transpose(img, (1, 2, 0))) # H x W x 3
-                                os.makedirs("data/diffusion_training_vis", exist_ok=True)
-                                img_pil.save(f"data/diffusion_training_vis/epoch{epoch_idx}_img{img_idx}.png")
-                        
-                        nagent_pos = nbatch["q_pos"][:, start_index_obs:end_index_obs].to(self.device)
-                        naction = nbatch["action"][:, start_index_action:end_index_action].to(self.device)
-                        B = nagent_pos.shape[0] # batch size
+                                img = (
+                                    nbatch["image"][0, img_idx, :, :, :]
+                                    .detach()
+                                    .cpu()
+                                    .numpy()
+                                )
+                                img = (img * 255).astype(np.uint8)  # 3 x 480 x 640
+                                img_pil = Image.fromarray(
+                                    np.transpose(img, (1, 2, 0))
+                                )  # H x W x 3
+                                os.makedirs(
+                                    "data/diffusion_training_vis", exist_ok=True
+                                )
+                                img_pil.save(
+                                    f"data/diffusion_training_vis/epoch{epoch_idx}_img{img_idx}.png"
+                                )
+
+                        nagent_pos = nbatch["q_pos"][
+                            :, start_index_obs:end_index_obs
+                        ].to(
+                            self.device
+                        )  # Shape: (batch_size, obs_horizon, state_dim)
+                        naction = nbatch["action"][
+                            :, start_index_action:end_index_action
+                        ].to(
+                            self.device
+                        )  # Shape: (batch_size, action_horizon, action_dim)
+                        B = nagent_pos.shape[0]  # batch size
 
                         # sample noise to add to actions
-                        noise = torch.randn(naction.shape, device=self.device) #randn is random normal
-                        # sample a diffusion iteration for each data point 
-                        #NOTE: What is this step doing? <- samples a random timestep to add noise up to. 
-                        # this teaches the model to denoise from any timestep. more efficient than training on all timesteps, 
+                        noise = torch.randn(
+                            naction.shape, device=self.device
+                        )  # randn is random normal
+                        # sample a diffusion iteration for each data point
+                        # NOTE: What is this step doing? <- samples a random timestep to add noise up to.
+                        # this teaches the model to denoise from any timestep. more efficient than training on all timesteps,
                         # because we know the mathematical relationship between any timestep in the diffusion process
                         timesteps = torch.randint(
                             low=0,
-                            high=self.noise_scheduler.config["num_train_timesteps"],  
+                            high=self.noise_scheduler.config["num_train_timesteps"],
                             size=(B,),
                             device=self.device,
                         ).long()
 
                         # add noise to the clean images according to the noise magnitude at each diffusion iteration
                         # (this is the forward diffusion process)
-                        noisy_actions = self.noise_scheduler.add_noise(naction, noise, timesteps)
+                        noisy_actions = self.noise_scheduler.add_noise(
+                            naction, noise, timesteps
+                        )
 
                         # predict the noise
-                        noise_pred = self.model(nimage, nagent_pos, noisy_actions, timesteps)
+                        noise_pred = self.model(
+                            nimage, nagent_pos, noisy_actions, timesteps
+                        )
 
                         # calculate loss
                         loss_val = self.loss_fn(noise_pred, noise)
@@ -379,27 +431,42 @@ class TrainDiffusIn:
             
     for wandb_file in os.listdir(FILES_OUTPUT_PATH):
         wandb.save(f"{FILES_OUTPUT_PATH}/{wandb_file}")
-        
 
-    def eval(self, env, pred_horizon=16, max_steps=500, render=False): # default values taken from TRI example, should change
-        """ Evaluation Loop for Diffusion Model """
-        #|o|o|                             observations: 2
-        #| |a|a|a|a|a|a|a|a|               actions executed: 8
-        #|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p| actions predicted: 16
+    def eval(
+        self, env, max_steps=500, render=False
+    ):  # default values taken from TRI example, should change
+        """Evaluation Loop for Diffusion Model"""
+        # |o|o|o|o|o|o|o|o|                 observations: 8
+        # |p|p|p|p|p|p|p|p|                 action predictions: 8
+        # | | | | | | | | |a|a|a|a|a|       actions executed: 4
 
-        self.ema_nets.load_state_dict(torch.load(
-            "data/diffusion_policy_models/diffusion_model_checkpoint.pth"
-        )["model_state_dict"], map_location=self.device)
+        pred_horizon = self.action_horizon
 
+        # Load the model checkpoint
+        self.ema_nets = self.model
+        checkpoint_path = FILES_OUTPUT_PATH / "diffusion_model_checkpoint.pth"
+        if not checkpoint_path.exists():
+            print(f"Checkpoint not found at {checkpoint_path}")
+            return
+        checkpoint = torch.load(str(checkpoint_path), map_location=self.device)
+        self.ema_nets.load_state_dict(checkpoint["model_state_dict"])
+        print(f"Loaded model checkpoint from {checkpoint_path}")
         self.ema_nets.eval()
-        obs, _ = env.reset()
 
-        obs_deque = collections.deque(
-            [obs] * self.obs_horizon, maxlen=self.obs_horizon
-        )
+        # Reset environment with random peg and socket pose
+        peg_pose, socket_pose = act_utils.sample_insertion_pose()
+        act_sim_env.BOX_POSE[0] = np.concatenate([peg_pose, socket_pose])
+        ts = env.reset()
+        onscreen_cam = "angle"
+
+        # Init obs deque with initial observations
+        # obs keys:'qpos', 'qvel', 'env_state', 'images'
+        # keys in obs['images']: 'top', 'angle', 'vis'. Image shape: (480, 640, 3)
+        obs = ts.observation
+        obs_deque = collections.deque([obs] * self.obs_horizon, maxlen=self.obs_horizon)
 
         if render:
-            imgs = [env.render(mode="rgb_array")]
+            imgs = [env._physics.render(height=480, width=640, camera_id=onscreen_cam)]
         else:
             imgs = []
         rewards = []
@@ -410,30 +477,41 @@ class TrainDiffusIn:
             while not done:
                 B = 1
                 # stack the last obs_horizon number of observations
-                images = np.stack([x["image"] for x in obs_deque])
-                agent_poses = np.stack([x["agent_pos"] for x in obs_deque])
+                images = np.stack([x["images"]["top"] for x in obs_deque])
+                agent_poses = np.stack([x["qpos"] for x in obs_deque])
 
                 # normalize observation
-                nagent_poses = (agent_poses-self.stats["qpos_mean"]) / self.stats["qpos_std"]
-                # images are already normalized to [0,1]
-                nimages = images
+                nagent_poses = (agent_poses - self.stats["qpos_mean"]) / self.stats[
+                    "qpos_std"
+                ]
+                # normalize images to [0,1]
+                nimages = images / 255.0
+
+                # Reshape images from (obs_horizon, h, w, c) to (1, obs_horizon, c, h, w)
+                nimages = nimages.transpose(0, 3, 1, 2)
+                nimages = np.expand_dims(nimages, axis=0)
+
+                # Reshape agent poses from (obs_horizon, state_dim) to (1, obs_horizon, state_dim)
+                nagent_poses = np.expand_dims(nagent_poses, axis=0)
 
                 # device transfer
-                nimages = torch.from_numpy(nimages).to(self.device, dtype=torch.float32)
-                # (2,3,96,96)
+                nimages = torch.from_numpy(nimages).to(
+                    self.device, dtype=torch.float32
+                )  # (1, obs_horizon, 3, 480, 640)
                 nagent_poses = torch.from_numpy(nagent_poses).to(
                     self.device, dtype=torch.float32
-                )
-                # (2,2)
+                )  # (1, obs_horizon, state_dim(14))
 
                 # infer action
                 with torch.no_grad():
                     # initialize action from Guassian noise
-                    noisy_action = torch.randn((B, pred_horizon, self.action_dim), device=self.device)
+                    noisy_action = torch.randn(
+                        (B, pred_horizon, self.action_dim), device=self.device
+                    )
                     naction = noisy_action
 
                     # init scheduler
-                    # NOTE: TRI example uses the same scheduler for training and inference. 
+                    # NOTE: TRI example uses the same scheduler for training and inference.
                     # may consider using different schedulers, eg DDIM, or reference https://arxiv.org/pdf/2301.10677
                     self.noise_scheduler.set_timesteps(self.diffusion_timesteps)
 
@@ -448,33 +526,45 @@ class TrainDiffusIn:
                         ).prev_sample
 
                 # unnormalize action
-                naction = naction.detach().to("cpu").numpy() # (B, pred_horizon, action_dim)
-                naction = naction[0]
-                action_pred = naction*self.stats["action_std"] + self.stats["action_mean"]
+                naction = (
+                    naction.detach().to("cpu").numpy()
+                )  # (B, pred_horizon, action_dim)
+                naction = naction[0]  # (pred_horizon, action_dim)
+                action_pred = (
+                    naction * self.stats["action_std"] + self.stats["action_mean"]
+                )
 
-                # only take action_horizon number of actions
-                start = self.obs_horizon - 1
-                end = start + self.action_horizon
-                action = action_pred[start:end, :]
-                # (action_horizon, action_dim)
+                # only take execution_horizon number of actions
+                action = action_pred[
+                    : self.execution_horizon, :
+                ]  # (execution_horizon, action_dim)
 
                 # execute action_horizon number of steps
                 # without replanning
                 for i in range(len(action)):
                     # stepping env
-                    obs, reward, done, _, info = env.step(action[i])
+                    ts = env.step(action[i])
+                    obs = ts.observation
+                    reward = ts.reward
+                    # obs, reward, done, _, info = env.step(action[i])
                     # save observations
                     obs_deque.append(obs)
                     # and reward/vis
                     rewards.append(reward)
 
                     if render:
-                        imgs.append(env.render(mode="rgb_array"))
+                        imgs.append(
+                            env._physics.render(
+                                height=480, width=640, camera_id=onscreen_cam
+                            )
+                        )
 
                     # update progress bar
                     step_idx += 1
                     pbar.update(1)
                     pbar.set_postfix(reward=reward)
+
+                    # TODO: Find a way to detect completion of the task and quit early
                     if step_idx > max_steps:
                         done = True
                     if done:
@@ -485,8 +575,7 @@ class TrainDiffusIn:
 
         if render:
             # save vis as gif
-            imageio.mimsave(f'data/gifs_diffusion.gif', imgs, fps=33)
-
+            imageio.mimsave(f"data/gifs_diffusion.gif", imgs, fps=33)
 
 
 if __name__ == "__main__":
@@ -497,7 +586,8 @@ if __name__ == "__main__":
         action_dim=ACTION_DIM,
         obs_horizon=OBSERVATION_HORIZON,
         vision_encoder=vision_encoder,
-        device=DEVICE,)
+        device=DEVICE,
+    )
     ## Dataset and Dataloader
     # NOTE: Cannot pass num_episodes = 1 because train/val split fails
     train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_data(
@@ -511,11 +601,12 @@ if __name__ == "__main__":
         action_dim=ACTION_DIM,
         obs_horizon=OBSERVATION_HORIZON,
         action_horizon=ACTION_HORIZON,
+        execution_horizon=EXECUTION_HORIZON,
         device=DEVICE,
         diffusion_timesteps=NUM_TRAIN_TIMESTEPS,
         num_epochs=NUM_EPOCHS,
     )
-    trainer.train()
+    # trainer.train()
 
-    env = act_sim_env.make_sim_env("sim_insertion") 
-    trainer.eval(env, render=True)
+    env = act_sim_env.make_sim_env("sim_insertion")
+    trainer.eval(env, max_steps=100, render=True)
