@@ -1,6 +1,7 @@
 numpy<2
 transformers
 h5py==3.15.1
+wandb
 
 # TRI colab code requirements
 torch==1.13.1 

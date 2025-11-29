@@ -38,6 +38,8 @@ from diffusion_dataloaders import load_data
 from diffusion_inference import setup_env
 from transformers import CLIPModel, CLIPProcessor
 
+import wandb
+
 # Env dependencies
 import act.sim_env as act_sim_env
 import imageio
@@ -64,6 +66,22 @@ OBSERVATION_DIM = VISION_FEATURE_DIM + STATE_DIM
 ACTION_DIM = 14
 ACTION_HORIZON = 8
 DEBUG = False
+
+wandb.login()
+wandb.init(entity="mrsd-smores", project="diffusIn-training")
+config = {
+    "num_epochs": NUM_EPOCHS,
+    "num_episodes": NUM_EPISODES,
+    "batch_size": BATCH_SIZE,
+    "num_train_timesteps": NUM_TRAIN_TIMESTEPS,
+    "vision_feature_dim": VISION_FEATURE_DIM,
+    "state_dim": STATE_DIM,
+    "observation_horizon": OBSERVATION_HORIZON,
+    "observation_dim": OBSERVATION_DIM,
+    "action_dim": ACTION_DIM,
+    "action_horizon": ACTION_HORIZON,
+    "vision_encoder": "OpenVision-vit-tiny-patch16-384",
+}
 
 # Action space:      [left_arm_qpos (6),             # absolute joint position
 #                         left_gripper_positions (1),    # normalized gripper position (0: close, 1: open)
@@ -306,6 +324,10 @@ class TrainDiffusIn:
                         loss_cpu = loss_val.item()
                         epoch_loss.append(loss_cpu)
                         t_epoch.set_postfix(loss=loss_cpu)
+                        wandb.log({"train/loss": loss_cpu})
+                        wandb.log({"train/lr": self.lr_scheduler.get_last_lr()[0]})
+                        wandb.log({"train/epoch": epoch_idx})
+                        
                 t_global.set_postfix(loss=np.mean(epoch_loss))
 
         # Weights of the EMA model
@@ -313,7 +335,6 @@ class TrainDiffusIn:
         self.ema_nets = self.model
         self.ema.copy_to(self.ema_nets.parameters())
 
-        # TODO Save Model Checkpoint. This is GROSSLY INCORRECT <- why?
         os.makedirs("data/diffusion_policy_models", exist_ok=True)
         torch.save(
             {
@@ -431,10 +452,6 @@ class TrainDiffusIn:
             imageio.mimsave(f'data/gifs_diffusion.gif', imgs, fps=33)
 
 
-# print(summary(model, 
-#         torch.zeros((BATCH_SIZE, OBSERVATION_HORIZON, 3, 64, 64), device=DEVICE), 
-#         torch.zeros((BATCH_SIZE, OBSERVATION_HORIZON, 2), device=DEVICE), 
-#         torch.zeros((BATCH_SIZE, STATE_DIM), device=DEVICE)))
 
 if __name__ == "__main__":
     vision_encoder = OpenVisionEncoder().to(device=DEVICE)
