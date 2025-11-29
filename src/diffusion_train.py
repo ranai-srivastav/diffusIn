@@ -177,7 +177,7 @@ class DiffusionModel(torch.nn.Module):
 
         self.vision_encoder = vision_encoder
 
-        #TODO: What order does Conv!D exepect it in? Is it (B, C, L) or (B, L, C)?
+        # TODO: What order does Conv!D exepect it in? Is it (B, C, L) or (B, L, C)?
         self.noise_predictor = ConditionalUnet1D(
             action_dim=action_dim, global_cond_dim=obs_dim * obs_horizon
         )
@@ -200,16 +200,12 @@ class DiffusionModel(torch.nn.Module):
 
         # concatenate vision feature and agent positions
         # TODO:Agent positions need to be raw inputs or embeddings?
-        obs_features = torch.cat(
-            [image_features, pos], dim=-1
-        )  # D -> D + state_dim = obs_dim
+        obs_features = torch.cat([image_features, pos], dim=-1)  # D -> D + state_dim = obs_dim
         obs_cond = obs_features.flatten(start_dim=1)
         # (B, obs_horizon * obs_dim)
 
         # predict the noise residual
-        noise_pred = self.noise_predictor(
-            noisy_actions, timesteps, global_cond=obs_cond
-        )
+        noise_pred = self.noise_predictor(noisy_actions, timesteps, global_cond=obs_cond)
 
         return noise_pred
 
@@ -248,11 +244,22 @@ class TrainDiffusIn:
 
         # Standard ADAM optimizer
         # Note that EMA parameters are not optimized
-        self.optimizer = torch.optim.AdamW(params=[
-                {"params": model.vision_encoder.parameters(), "lr":4e-4, "name":"vision_encoder"},       # ViT was trained with 4e-3 LR
-                {"params": model.noise_predictor.parameters(), "lr":1e-4, "name":"noise_predictor"}],     
+        self.optimizer = torch.optim.AdamW(
+            params=[
+                {
+                    "params": model.vision_encoder.parameters(),
+                    "lr": 4e-4,
+                    "name": "vision_encoder",
+                },  # ViT was trained with 4e-3 LR
+                {
+                    "params": model.noise_predictor.parameters(),
+                    "lr": 1e-4,
+                    "name": "noise_predictor",
+                },
+            ],
             lr=1e-4,
-            weight_decay=1e-6)
+            weight_decay=1e-6,
+        )
 
         # Cosine LR schedule with linear warmup
         self.lr_scheduler = get_scheduler(
@@ -275,10 +282,10 @@ class TrainDiffusIn:
 
         # L2 loss
         self.loss_fn = torch.nn.MSELoss()
-        self.loss_per_ep = {key:[10.] for key in range(NUM_EPISODES)}
+        self.loss_per_ep = {key: [10.0] for key in range(NUM_EPISODES)}
 
     def train(self):
-        """ Training Loop for Diffusion Model """
+        """Training Loop for Diffusion Model"""
         self.ema_nets = self.model
         least_val_loss = float("inf")
         with tqdm(range(self.num_epochs), desc="Epoch") as t_global:
@@ -370,16 +377,20 @@ class TrainDiffusIn:
 
                         # calculate loss
                         loss_val = self.loss_fn(noise_pred, noise)
-                        
+
                         # logging
                         loss_cpu = loss_val.item()
                         epoch_loss.append(loss_cpu)
                         t_epoch.set_postfix(loss=loss_cpu)
                         # self.loss_per_ep[epoch_idx].append(loss_cpu)
-                        wandb.log({"train/loss": loss_cpu, 
-                                   "train/vision_lr": self.lr_scheduler.get_last_lr()[0],
-                                   "train/noise_lr": self.lr_scheduler.get_last_lr()[1],
-                                   "train/epoch": epoch_idx})
+                        wandb.log(
+                            {
+                                "train/loss": loss_cpu,
+                                "train/vision_lr": self.lr_scheduler.get_last_lr()[0],
+                                "train/noise_lr": self.lr_scheduler.get_last_lr()[1],
+                                "train/epoch": epoch_idx,
+                            }
+                        )
 
                         # optimize
                         loss_val.backward()
@@ -390,15 +401,15 @@ class TrainDiffusIn:
                         self.lr_scheduler.step()
 
                         # update Exponential Moving Average of the model weights
-                        self.ema.step(self.model.parameters()) #NOTE: Understand why.
-                        
+                        self.ema.step(self.model.parameters())  # NOTE: Understand why.
+
                 t_global.set_postfix(loss=np.mean(epoch_loss))
                 wandb.log({"train/epoch_loss": np.mean(epoch_loss)})
-                
+
                 # Per trajectory loss over time
                 # for traj_idx in range(NUM_EPISODES):
                 #     wandb.log({f"traj/traj_{traj_idx}": self.loss_per_ep[traj_idx][-1]})
-                
+
                 # Save this model
                 os.makedirs("data/diffusion_policy_models", exist_ok=True)
                 torch.save(
@@ -409,8 +420,10 @@ class TrainDiffusIn:
                     },
                     f"{FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth",
                 )
-                print(f"Saved last_model_checkpoint at {FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth")
-                
+                print(
+                    f"Saved last_model_checkpoint at {FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth"
+                )
+
                 # Save this as the best model if validation loss improves
                 if least_val_loss > loss_cpu:
                     least_val_loss = loss_cpu
@@ -422,19 +435,18 @@ class TrainDiffusIn:
                         },
                         f"{FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth",
                     )
-                    print(f"Saved best_model_checkpoint at {FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth")
+                    print(
+                        f"Saved best_model_checkpoint at {FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth"
+                    )
 
         # Weights of the EMA model
         # is used for inference
         self.ema.copy_to(self.ema_nets.parameters())
 
-            
     for wandb_file in os.listdir(FILES_OUTPUT_PATH):
         wandb.save(f"{FILES_OUTPUT_PATH}/{wandb_file}")
 
-    def eval(
-        self, env, max_steps=500, render=False
-    ):  # default values taken from TRI example, should change
+    def eval(self, env, max_steps=500, render=False):  # default values taken from TRI example, should change
         """Evaluation Loop for Diffusion Model"""
         # |o|o|o|o|o|o|o|o|                 observations: 8
         # |p|p|p|p|p|p|p|p|                 action predictions: 8

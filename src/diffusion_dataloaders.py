@@ -167,8 +167,24 @@ def load_data(
         train_indices, dataset_dir, camera_names, norm_stats
     )
     val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=1, persistent_workers=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=1, persistent_workers=True)
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size_train,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=4,
+        prefetch_factor=1,
+        persistent_workers=True,
+    )
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size_val,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=4,
+        prefetch_factor=1,
+        persistent_workers=True,
+    )
 
     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
 
