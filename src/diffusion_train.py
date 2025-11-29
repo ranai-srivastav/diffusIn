@@ -57,7 +57,7 @@ DATASET_PATH = (
     if DATASET_PATH.exists()
     else "DATASET IS AS LOST AS YOU ARE - NOT FOUND IN THE GIVEN PATH"
 )
-FILES_OUTPUT_PATH = Path("data/diffusion_policy_models").absolute()
+FILES_OUTPUT_PATH = Path("data/diffusion_policy_models2").absolute()
 BATCH_SIZE = 1
 NUM_TRAIN_TIMESTEPS = 100
 VISION_FEATURE_DIM = 192
@@ -201,7 +201,7 @@ class DiffusionModel(torch.nn.Module):
 class TrainDiffusIn:
     def __init__(
             self,
-            model,
+            model: DiffusionModel,
             train_dataloader,
             val_dataloader,
             stats,
@@ -229,7 +229,11 @@ class TrainDiffusIn:
 
         # Standard ADAM optimizer
         # Note that EMA parameters are not optimized
-        self.optimizer = torch.optim.AdamW(params=model.parameters(), lr=1e-4, weight_decay=1e-6)
+        self.optimizer = torch.optim.AdamW(params=[
+                {"params": model.vision_encoder.parameters(), "lr":4e-4},       # ViT was trained with 4e-3 LR
+                {"params": model.noise_predictor.parameters(), "lr":1e-4}],     
+            lr=1e-4, 
+            weight_decay=1e-6)
 
         # Cosine LR schedule with linear warmup
         self.lr_scheduler = get_scheduler(
@@ -332,6 +336,8 @@ class TrainDiffusIn:
                         wandb.log({"train/epoch": epoch_idx})
                         
                 t_global.set_postfix(loss=np.mean(epoch_loss))
+                wandb.log({"train/epoch_loss": np.mean(epoch_loss), 
+                           "epoch": epoch_idx})
 
         # Weights of the EMA model
         # is used for inference
@@ -346,6 +352,7 @@ class TrainDiffusIn:
                 "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
             },
             f"{FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth",
+            print(f"Saved last_model_checkpoint at {FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth"),
         )
         
         if least_val_loss < loss_cpu:
@@ -357,6 +364,7 @@ class TrainDiffusIn:
                     "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
                 },
                 f"{FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth",
+                print(f"Saved best_model_checkpoint at {FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth"),
             )
             
     for wandb_file in os.listdir(FILES_OUTPUT_PATH):
