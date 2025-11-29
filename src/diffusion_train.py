@@ -170,6 +170,7 @@ class DiffusionModel(torch.nn.Module):
 
         self.vision_encoder = vision_encoder
 
+        #TODO: What order does Conv!D exepect it in? Is it (B, C, L) or (B, L, C)?
         self.noise_predictor = ConditionalUnet1D(
             action_dim=action_dim, 
             global_cond_dim=obs_dim * obs_horizon)
@@ -256,7 +257,7 @@ class TrainDiffusIn:
 
         # L2 loss
         self.loss_fn = torch.nn.MSELoss()
-        self.loss_per_ep = {key:[] for key in range(NUM_EPISODES)}
+        self.loss_per_ep = {key:[10.] for key in range(NUM_EPISODES)}
 
     def train(self):
         """ Training Loop for Diffusion Model """
@@ -316,6 +317,19 @@ class TrainDiffusIn:
 
                         # calculate loss
                         loss_val = self.loss_fn(noise_pred, noise)
+                        
+                        # logging
+                        loss_cpu = loss_val.item()
+                        epoch_loss.append(loss_cpu)
+                        t_epoch.set_postfix(loss=loss_cpu)
+                        self.loss_per_ep[epoch_idx].append(loss_cpu)
+                        wandb.log({"train/loss": loss_cpu, 
+                                   "train/vision_lr": self.lr_scheduler.get_last_lr()[0],
+                                   "train/noise_lr": self.lr_scheduler.get_last_lr()[1],
+                                   "train/epoch": epoch_idx})
+                        
+                        for traj_idx in range(self.num_episodes):
+                            wandb.log({f"traj/traj_{traj_idx}": self.loss_per_ep[traj_idx][-1]})
 
                         # optimize
                         loss_val.backward()
@@ -327,49 +341,38 @@ class TrainDiffusIn:
 
                         # update Exponential Moving Average of the model weights
                         self.ema.step(self.model.parameters()) #NOTE: Understand why.
-
-                        # logging
-                        loss_cpu = loss_val.item()
-                        epoch_loss.append(loss_cpu)
-                        t_epoch.set_postfix(loss=loss_cpu)
-                        self.loss_per_ep[epoch_idx].append(loss_cpu)
-                        wandb.log({"train/loss": loss_cpu})
-                        wandb.log({"train/vision_lr": self.lr_scheduler.get_last_lr()[0]})
-                        wandb.log({"train/noise_lr": self.lr_scheduler.get_last_lr()[1]})
-                        wandb.log({"train/epoch": epoch_idx})
-                        for traj_idx in range(self.num_episodes):
-                            wandb.log({f"traj/traj_{traj_idx}": self.loss_per_ep[traj_idx][-1]})
                         
                 t_global.set_postfix(loss=np.mean(epoch_loss))
                 wandb.log({"train/epoch_loss": np.mean(epoch_loss)})
+                
+                os.makedirs("data/diffusion_policy_models", exist_ok=True)
+                torch.save(
+                    {
+                        "model_state_dict": self.ema_nets.state_dict(),
+                        "optimizer_state_dict": self.optimizer.state_dict(),
+                        "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
+                    },
+                    f"{FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth",
+                )
+                print(f"Saved last_model_checkpoint at {FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth"),
+                
+                if least_val_loss < loss_cpu:
+                    least_val_loss = loss_cpu
+                    torch.save(
+                        {
+                            "model_state_dict": self.ema_nets.state_dict(),
+                            "optimizer_state_dict": self.optimizer.state_dict(),
+                            "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
+                        },
+                        f"{FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth",
+                    )
+                    print(f"Saved best_model_checkpoint at {FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth")
 
         # Weights of the EMA model
         # is used for inference
         self.ema_nets = self.model
         self.ema.copy_to(self.ema_nets.parameters())
 
-        os.makedirs("data/diffusion_policy_models", exist_ok=True)
-        torch.save(
-            {
-                "model_state_dict": self.ema_nets.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
-            },
-            f"{FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth",
-            print(f"Saved last_model_checkpoint at {FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth"),
-        )
-        
-        if least_val_loss < loss_cpu:
-            least_val_loss = loss_cpu
-            torch.save(
-                {
-                    "model_state_dict": self.ema_nets.state_dict(),
-                    "optimizer_state_dict": self.optimizer.state_dict(),
-                    "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
-                },
-                f"{FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth",
-                print(f"Saved best_model_checkpoint at {FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth"),
-            )
             
     for wandb_file in os.listdir(FILES_OUTPUT_PATH):
         wandb.save(f"{FILES_OUTPUT_PATH}/{wandb_file}")
