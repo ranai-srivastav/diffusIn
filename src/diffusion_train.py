@@ -50,7 +50,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 ## Tunable Params
 NUM_EPOCHS = 100
-NUM_EPISODES = 100
+NUM_EPISODES = 2
 DATASET_PATH = Path("data").absolute()
 DATASET_PATH = (
     DATASET_PATH
@@ -261,13 +261,14 @@ class TrainDiffusIn:
 
     def train(self):
         """ Training Loop for Diffusion Model """
-        
+        self.ema_nets = self.model
         least_val_loss = float("inf")
         with tqdm(range(self.num_epochs), desc="Epoch") as t_global:
             # epoch loop
             for epoch_idx in t_global:
                 epoch_loss = list()
                 # batch loop
+
                 with tqdm(self.train_dataloader, desc="Batch", leave=False) as t_epoch:
                     for nbatch in t_epoch:
                         end_index_obs = np.random.randint(self.obs_horizon, nbatch["image"].shape[1] - self.action_horizon)
@@ -322,7 +323,7 @@ class TrainDiffusIn:
                         loss_cpu = loss_val.item()
                         epoch_loss.append(loss_cpu)
                         t_epoch.set_postfix(loss=loss_cpu)
-                        self.loss_per_ep[epoch_idx].append(loss_cpu)
+                        # self.loss_per_ep[epoch_idx].append(loss_cpu)
                         wandb.log({"train/loss": loss_cpu, 
                                    "train/vision_lr": self.lr_scheduler.get_last_lr()[0],
                                    "train/noise_lr": self.lr_scheduler.get_last_lr()[1],
@@ -343,8 +344,8 @@ class TrainDiffusIn:
                 wandb.log({"train/epoch_loss": np.mean(epoch_loss)})
                 
                 # Per trajectory loss over time
-                for traj_idx in range(NUM_EPISODES):
-                    wandb.log({f"traj/traj_{traj_idx}": self.loss_per_ep[traj_idx][-1]})
+                # for traj_idx in range(NUM_EPISODES):
+                #     wandb.log({f"traj/traj_{traj_idx}": self.loss_per_ep[traj_idx][-1]})
                 
                 # Save this model
                 os.makedirs("data/diffusion_policy_models", exist_ok=True)
@@ -356,10 +357,10 @@ class TrainDiffusIn:
                     },
                     f"{FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth",
                 )
-                print(f"Saved last_model_checkpoint at {FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth"),
+                print(f"Saved last_model_checkpoint at {FILES_OUTPUT_PATH}/last_diffusion_model_checkpoint.pth")
                 
                 # Save this as the best model if validation loss improves
-                if least_val_loss < loss_cpu:
+                if least_val_loss > loss_cpu:
                     least_val_loss = loss_cpu
                     torch.save(
                         {
@@ -373,7 +374,6 @@ class TrainDiffusIn:
 
         # Weights of the EMA model
         # is used for inference
-        self.ema_nets = self.model
         self.ema.copy_to(self.ema_nets.parameters())
 
             
