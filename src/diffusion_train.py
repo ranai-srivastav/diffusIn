@@ -51,13 +51,15 @@ DATASET_PATH = (
     if DATASET_PATH.exists()
     else "DATASET IS AS LOST AS YOU ARE - NOT FOUND IN THE GIVEN PATH"
 )
-BATCH_SIZE = 1
+BATCH_SIZE = 4
 NUM_TRAIN_TIMESTEPS = 100
 VISION_FEATURE_DIM = 192
 STATE_DIM = 14
 OBSERVATION_HORIZON = 8
 OBSERVATION_DIM = VISION_FEATURE_DIM + STATE_DIM
 ACTION_DIM = 14
+ACTION_HORIZON = 8
+DEBUG = False
 
 # Action space:      [left_arm_qpos (6),             # absolute joint position
 #                         left_gripper_positions (1),    # normalized gripper position (0: close, 1: open)
@@ -242,8 +244,19 @@ class TrainDiffusIn:
                         # device transfer
                         # load a batch of data from expert trajectory: image, agent_pos, action
                         nimage = nbatch["image"][:, :self.obs_horizon].to(self.device)
+
+                        # Save images to visualize later if needed
+                        if DEBUG:
+                            for img_idx in range(nbatch["image"].shape[1]):
+                                img = nbatch["image"][0, img_idx, :, :, :].detach().cpu().numpy()
+                                img = (img * 255).astype(np.uint8) # 3 x 480 x 640
+                                img_pil = Image.fromarray(np.transpose(img, (1, 2, 0))) # H x W x 3
+                                os.makedirs("data/diffusion_training_vis", exist_ok=True)
+                                img_pil.save(f"data/diffusion_training_vis/epoch{epoch_idx}_img{img_idx}.png")
+                        
                         nagent_pos = nbatch["q_pos"][:, :self.obs_horizon].to(self.device)
-                        naction = nbatch["action"][:, :self.obs_horizon].to(self.device)
+                        # naction = nbatch["action"][:, :self.obs_horizon].to(self.device)
+                        naction = nbatch["action"].to(self.device)
                         B = nagent_pos.shape[0] # batch size
 
                         # sample noise to add to actions
