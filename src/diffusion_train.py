@@ -50,7 +50,6 @@ import imageio
 
 ## Torch Params
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DEVICE = "cpu"
 
 
 ## Tunable Params
@@ -411,6 +410,7 @@ class TrainDiffusIn:
                 #     wandb.log({f"traj/traj_{traj_idx}": self.loss_per_ep[traj_idx][-1]})
 
                 # Save this model
+                self.ema.copy_to(self.ema_nets.parameters())
                 os.makedirs("data/diffusion_policy_models", exist_ok=True)
                 torch.save(
                     {
@@ -438,10 +438,6 @@ class TrainDiffusIn:
                     print(
                         f"Saved best_model_checkpoint at {FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth"
                     )
-
-        # Weights of the EMA model
-        # is used for inference
-        self.ema.copy_to(self.ema_nets.parameters())
 
     for wandb_file in os.listdir(FILES_OUTPUT_PATH):
         wandb.save(f"{FILES_OUTPUT_PATH}/{wandb_file}")
