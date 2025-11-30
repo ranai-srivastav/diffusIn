@@ -287,6 +287,7 @@ class TrainDiffusIn:
         """Training Loop for Diffusion Model"""
         self.ema_nets = self.model
         least_val_loss = float("inf")
+        os.makedirs(FILES_OUTPUT_PATH, exist_ok=True)
         with tqdm(range(self.num_epochs), desc="Epoch") as t_global:
             # epoch loop
             for epoch_idx in t_global:
@@ -411,7 +412,6 @@ class TrainDiffusIn:
 
                 # Save this model
                 self.ema.copy_to(self.ema_nets.parameters())
-                os.makedirs("data/diffusion_policy_models", exist_ok=True)
                 torch.save(
                     {
                         "model_state_dict": self.ema_nets.state_dict(),
@@ -439,8 +439,8 @@ class TrainDiffusIn:
                         f"Saved best_model_checkpoint at {FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth"
                     )
 
-    for wandb_file in os.listdir(FILES_OUTPUT_PATH):
-        wandb.save(f"{FILES_OUTPUT_PATH}/{wandb_file}")
+        for wandb_file in os.listdir(FILES_OUTPUT_PATH):
+            wandb.save(f"{FILES_OUTPUT_PATH}/{wandb_file}")
 
     def eval(self, env, max_steps=500, render=False):  # default values taken from TRI example, should change
         """Evaluation Loop for Diffusion Model"""
@@ -614,7 +614,7 @@ if __name__ == "__main__":
         diffusion_timesteps=NUM_TRAIN_TIMESTEPS,
         num_epochs=NUM_EPOCHS,
     )
-    # trainer.train()
+    trainer.train()
 
     env = act_sim_env.make_sim_env("sim_insertion")
     trainer.eval(env, max_steps=100, render=True)
