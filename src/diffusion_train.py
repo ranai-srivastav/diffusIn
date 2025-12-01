@@ -308,6 +308,7 @@ class TrainDiffusIn:
                         start_index_action = np.random.randint(self.obs_horizon, nbatch["lengths"] - self.action_horizon)      
                         start_index_obs = start_index_action - self.obs_horizon
                         
+                        #TODO: Can be moved into dataloader for efficiency
                         indices_arr = []
                         B = nbatch["image"].shape[0]
                         lower = self.obs_horizon
@@ -317,6 +318,7 @@ class TrainDiffusIn:
                         for i in range(stacked_indices.shape[0]):
                             np.random.shuffle(stacked_indices[i])
                         
+                        batch_loss = 0.0
                         with tqdm(range(stacked_indices.shape[1]), desc="Sequence", leave=False) as t_seq:
                             for i in range(stacked_indices.shape[1]):
                                 # Using numpy advanced indexing to select variable length sequences from the padded batch
@@ -380,31 +382,34 @@ class TrainDiffusIn:
                                 # calculate loss
                                 loss_val = self.loss_fn(noise_pred, noise)
 
-                                # logging
-                                loss_cpu = loss_val.item()
-                                epoch_loss.append(loss_cpu)
-                                t_epoch.set_postfix(loss=loss_cpu)
-                                # self.loss_per_ep[epoch_idx].append(loss_cpu)
-                                if WANDB:
-                                    wandb.log(
-                                        {
-                                            "train/loss": loss_cpu,
-                                            "train/vision_lr": self.lr_scheduler.get_last_lr()[0],
-                                            "train/noise_lr": self.lr_scheduler.get_last_lr()[1],
-                                            "train/epoch": epoch_idx,
-                                        }
-                                    )
+                                batch_loss += loss_val
+                        
+                        # optimize
+                        # this is different from standard pytorch behavior #NOTE: Understand why they are doing so
+                        batch_loss = batch_loss / stacked_indices.shape[1]
+                        batch_loss.backward()
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
 
-                                # optimize
-                                loss_val.backward()
-                                self.optimizer.step()
-                                self.optimizer.zero_grad()
-                                # step lr scheduler every batch
-                                # this is different from standard pytorch behavior #NOTE: Understand why they are doing so
-                                self.lr_scheduler.step()
+                        # step lr scheduler every batch
+                        self.lr_scheduler.step()
 
-                                # update Exponential Moving Average of the model weights
-                                self.ema.step(self.model.parameters())  # NOTE: Understand why.
+                        self.ema.step(self.model.parameters())
+                        
+                        # logging
+                        loss_cpu = batch_loss.item()
+                        epoch_loss.append(loss_cpu)
+                        t_epoch.set_postfix(loss=loss_cpu)
+                        # self.loss_per_ep[epoch_idx].append(loss_cpu)
+                        if WANDB:
+                            wandb.log(
+                                {
+                                    "train/loss": loss_cpu,
+                                    "train/vision_lr": self.lr_scheduler.get_last_lr()[0],
+                                    "train/noise_lr": self.lr_scheduler.get_last_lr()[1],
+                                    "train/epoch": epoch_idx,
+                                }
+                            )
 
                 t_global.set_postfix(loss=np.mean(epoch_loss))
                 if WANDB:
@@ -442,9 +447,10 @@ class TrainDiffusIn:
                     print(
                         f"Saved best_model_checkpoint at {FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth"
                     )
-        if WANDB:
-            for wandb_file in os.listdir(FILES_OUTPUT_PATH):
-                wandb.save(f"{FILES_OUTPUT_PATH}/{wandb_file}")
+                    
+                if WANDB:
+                    for wandb_file in os.listdir(FILES_OUTPUT_PATH):
+                        wandb.save(f"{FILES_OUTPUT_PATH}/{wandb_file}")
 
     def eval(self, env, max_steps=500, render=False):  # default values taken from TRI example, should change
         """Evaluation Loop for Diffusion Model"""
