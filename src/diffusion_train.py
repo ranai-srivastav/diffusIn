@@ -65,10 +65,11 @@ FILES_OUTPUT_PATH = Path("data/diffusion_policy_models2").absolute()
 # Change the name of the pth file here
 VIS_WEIGHTS_FILENAME = "best_diffusion_model_e61.pth"
 CHECKPOINT_PATH = FILES_OUTPUT_PATH / VIS_WEIGHTS_FILENAME
-BATCH_SIZE = 1
+BATCH_SIZE = 2
 NUM_TRAIN_TIMESTEPS = 100
 VISION_FEATURE_DIM = 192
 STATE_DIM = 14
+# TODO: Change observation horizon to 2
 OBSERVATION_HORIZON = 8
 OBSERVATION_DIM = VISION_FEATURE_DIM + STATE_DIM
 ACTION_DIM = 14

@@ -146,6 +146,27 @@ def get_norm_stats(dataset_dir, episode_ids):
 def custom_collate_fn(batch):
     # pad all the sequences in the batch to the same length
     batch_size = len(batch)
+    max_seq_len = max(item["image"].shape[0] for item in batch)
+
+    # assign padded tensors for all keys
+    collated_batch = {}
+    lengths = torch.tensor([item["image"].shape[0] for item in batch], dtype=torch.long)
+
+    for key in batch[0].keys():
+        example_tensor = batch[0][key]
+        # tensor shape = (seq_len, feature_dim...)
+        tensor_shape = example_tensor.shape[1:]
+        # padded tensor shape = (batch_size, max_seq_len, feature_dim...)
+        padded_tensor = torch.zeros((batch_size, max_seq_len) + tensor_shape)
+
+        for i, item in enumerate(batch):
+            seq_len = item[key].shape[0]
+            padded_tensor[i, :seq_len] = item[key]
+            lengths[i] = seq_len
+
+        collated_batch[key] = padded_tensor
+    collated_batch["lengths"] = lengths
+    return collated_batch
 
 def load_data(
     dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val
@@ -175,6 +196,7 @@ def load_data(
         shuffle=True,
         pin_memory=True,
         num_workers=4,
+        # TODO: Tune prefetch factor
         prefetch_factor=1,
         persistent_workers=True,
         collate_fn=custom_collate_fn,
