@@ -684,5 +684,5 @@ if __name__ == "__main__":
     )
     trainer.train()
 
-    env = act_sim_env.make_sim_env("sim_insertion")
-    trainer.eval(env, max_steps=125, render=True)
+    # env = act_sim_env.make_sim_env("sim_insertion")
+    # trainer.eval(env, max_steps=125, render=True)
