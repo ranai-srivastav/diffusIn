@@ -8,6 +8,14 @@ from tqdm import tqdm
 from PIL import Image
 import yaml
 
+sys.path.extend(
+    [
+        str(Path("include").resolve()),
+        str(Path("include/act").resolve()),
+        str(Path("include/OpenVision").resolve()),
+    ]
+)
+
 # Env dependencies
 import act.sim_env as act_sim_env
 import act.utils as act_utils
@@ -81,7 +89,7 @@ def parse_config(config_path):
     return validated_config
 
 class InferDiffusIn:
-    def __init__(self, file_path, checkpoint_path=None, debug=False):
+    def __init__(self, file_path, checkpoint_name=None, debug=False):
 
         config = parse_config(Path(file_path) / "config.yaml")
         self.num_epochs = config["training"].get("num_epochs", 100)
@@ -91,6 +99,7 @@ class InferDiffusIn:
         self.execution_horizon = config["model"].get("execution_horizon", 4)
         self.debug = debug
         self.file_path = file_path
+        self.checkpoint_name = checkpoint_name
 
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=config["training"].get("num_train_timesteps", 100),
@@ -104,25 +113,24 @@ class InferDiffusIn:
         )
 
         # load model
-        if config["model"].get("vision_encoder", "OpenVision-vit-tiny-patch16-384") == "CLIP":
+        if config["model"].get("vision_encoder", "OpenVision-vit-tiny") == "CLIP":
             self.vision_encoder = CLIPEncoder().to(self.device)
         else:
             self.vision_encoder = OpenVisionEncoder().to(self.device)
         self.ema_nets = DiffusionModel(
             state_dim=config["model"].get("state_dim", 14),
-            obs_dim=config["model"].get("observation_dim", 24),
+            obs_dim=config["model"].get("observation_dim", 206),
             action_dim=config["model"].get("action_dim", 14),
             obs_horizon=config["model"].get("observation_horizon", 8),
             vision_encoder=self.vision_encoder,
             device=self.device,
         )
-        if checkpoint_path is None:
-            checkpoint_path = file_path / ("best_diffusion_model.pth")
-        self.checkpoint_path = checkpoint_path
-        checkpoint_path = Path(checkpoint_path)
+        if checkpoint_name is None:
+            checkpoint_path = Path(file_path) / ("last_diffusion_model_checkpoint.pth")
+        else:
+            checkpoint_path = Path(file_path) / checkpoint_name
         if not checkpoint_path.exists():
-            print(f"Checkpoint not found at {checkpoint_path}")
-            return
+            raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
         checkpoint = torch.load(str(checkpoint_path), map_location=self.device)
         self.ema_nets.load_state_dict(checkpoint["model_state_dict"])
         print(f"Loaded model checkpoint from {checkpoint_path}")
@@ -274,8 +282,7 @@ class InferDiffusIn:
 
         if render:
             # save vis as gif
-            os.makedirs("data/diffusion_eval_vis", exist_ok=True)
-            imageio.mimsave(f"data/diffusion_eval_vis/{self.checkpoint_path}.gif", imgs, fps=15)
+            imageio.mimsave(f"data/eval_vis_{self.checkpoint_name}.gif", imgs, fps=15)
 
     def visualize_actions(self, actions, save_path="action_visualization.png"):
         """Visualize action sequences as line plots for each action dimension"""
@@ -327,6 +334,7 @@ if __name__ == "__main__":
     # Training arguments
     parser.add_argument("--file_dir_path", type=str, required=True,
                         help="Path to the config.yaml file")
+    parser.add_argument("--checkpoint_name", type=str, default=None,)
     args = parser.parse_args()
-    evaluator = InferDiffusIn(file_path=args.file_dir_path)
-    evaluator.eval(env, max_steps=125, render=True)
+    evaluator = InferDiffusIn(file_path=args.file_dir_path, checkpoint_name=args.checkpoint_name)
+    evaluator.eval(env, max_steps=500, render=True)

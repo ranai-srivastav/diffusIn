@@ -40,7 +40,6 @@ from diffusion_layers import (
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
 from diffusion_dataloaders import load_data
-from diffusion_inference import setup_env
 from transformers import CLIPModel, CLIPProcessor
 
 import wandb
@@ -416,7 +415,7 @@ class TrainDiffusIn:
                         f"{self.files_output_path}/best_diffusion_model_e{epoch_idx}.pth",
                     )
                     print(
-                        f"Saved best_model_checkpoint at {self.files_output_path}/best_diffusion_model.pth"
+                        f"Saved best_model_checkpoint at {self.files_output_path}/best_diffusion_model_e{epoch_idx}.pth"
                     )
                     
                 if self.track_wandb:
@@ -441,8 +440,6 @@ if __name__ == "__main__":
                        help="EMA power (default: 0.75)")
     
     # Model arguments
-    parser.add_argument("--vision-feature-dim", type=int, default=192,
-                       help="Vision feature dimension (default: 192)")
     parser.add_argument("--state-dim", type=int, default=14,
                        help="State dimension (default: 14)")
     parser.add_argument("--obs-horizon", type=int, default=8,
@@ -453,9 +450,9 @@ if __name__ == "__main__":
                        help="Action horizon (default: 8)")
     parser.add_argument("--execution-horizon", type=int, default=4,
                        help="Execution horizon (default: 4)")
-    parser.add_argument("--vision-encoder", type=str, default="OpenVision-vit-tiny-patch16-384",
-                       choices=["OpenVision-vit-tiny-patch16-384", "CLIP"],
-                       help="Vision encoder type (default: OpenVision-vit-tiny-patch16-384)")
+    parser.add_argument("--vision-encoder", type=str, default="OpenVision-vit-tiny",
+                       choices=["OpenVision-vit-tiny", "CLIP"],
+                       help="Vision encoder type (default: OpenVision-vit-tiny)")
     
     # Path arguments
     parser.add_argument("--dataset-path", type=str, default="data",
@@ -478,9 +475,6 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # Compute observation_dim from vision_feature_dim + state_dim
-    args.observation_dim = args.vision_feature_dim + args.state_dim
-    
     dataset_path = Path(args.dataset_path).absolute()
     if not dataset_path.exists():
         print(f"Warning: Dataset path {dataset_path} does not exist")
@@ -493,6 +487,17 @@ if __name__ == "__main__":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(args.device)
+
+    # Initialize vision encoder
+    if args.vision_encoder == "CLIP":
+        vision_encoder = CLIPEncoder().to(device=device)
+        args.vision_feature_dim = 512
+    else:
+        vision_encoder = OpenVisionEncoder().to(device=device)
+        args.vision_feature_dim = 192
+
+    # Compute observation_dim from vision_feature_dim + state_dim
+    args.observation_dim = args.vision_feature_dim + args.state_dim
     
     # Save configuration to YAML file in output directory
     config_dict = {
@@ -517,12 +522,6 @@ if __name__ == "__main__":
     save_config(config_dict, files_output_path)
     
     print(f"Using device: {device}")
-    
-    # Initialize vision encoder
-    if args.vision_encoder == "CLIP":
-        vision_encoder = CLIPEncoder().to(device=device)
-    else:
-        vision_encoder = OpenVisionEncoder().to(device=device)
     
     # Initialize model
     model = DiffusionModel(
