@@ -307,95 +307,104 @@ class TrainDiffusIn:
                         # so that the model does not overfit to fixed positions in the sequences
                         start_index_action = np.random.randint(self.obs_horizon, nbatch["lengths"] - self.action_horizon)      
                         start_index_obs = start_index_action - self.obs_horizon
-                        # start_index_action = end_index_obs
-                        # end_index_action = start_index_action + self.action_horizon
-
-                        # Using numpy advanced indexing to select variable length sequences from the padded batch
-
-                        B = nbatch["image"].shape[0]
-                        # Create indices between start and end indices for each element in the batch
-                        obs_idx = start_index_obs[:, None] + np.arange(self.obs_horizon)[None, :]
-                        action_idx = start_index_action[:, None] + np.arange(self.action_horizon)[None, :]
                         
-                        # Splice out the relevant sequences using the above indices
-                        nimage = nbatch["image"][np.arange(B)[:, None], obs_idx].to(self.device)
-                        nagent_pos = nbatch["q_pos"][np.arange(B)[:, None], obs_idx].to(self.device)
-                        naction = nbatch["action"][np.arange(B)[:, None], action_idx].to(self.device)
+                        indices_arr = []
+                        B = nbatch["image"].shape[0]
+                        lower = self.obs_horizon
+                        upper = (torch.min(nbatch["lengths"]) - self.action_horizon).item()
+                        indices = np.array(range(lower, upper, self.action_horizon))
+                        stacked_indices = np.tile(indices, (B, 1))
+                        for i in range(stacked_indices.shape[0]):
+                            np.random.shuffle(stacked_indices[i])
+                        
+                        with tqdm(range(stacked_indices.shape[1]), desc="Sequence", leave=False) as t_seq:
+                            for i in range(stacked_indices.shape[1]):
+                                # Using numpy advanced indexing to select variable length sequences from the padded batch
+                                start_index_obs = stacked_indices[:, i] - self.obs_horizon
+                                start_index_action = stacked_indices[:, i]
+                                # Create indices between start and end indices for each element in the batch
+                                obs_idx = start_index_obs[:, None] + np.arange(self.obs_horizon)[None, :]
+                                action_idx = start_index_action[:, None] + np.arange(self.action_horizon)[None, :]
+                                
+                                # Splice out the relevant sequences using the above indices
+                                nimage = nbatch["image"][np.arange(B)[:, None], obs_idx].to(self.device)
+                                nagent_pos = nbatch["q_pos"][np.arange(B)[:, None], obs_idx].to(self.device)
+                                naction = nbatch["action"][np.arange(B)[:, None], action_idx].to(self.device)
 
-                        # Save images to visualize later if needed
-                        if DEBUG:
-                            for img_idx in range(nbatch["image"].shape[1]):
-                                img = (
-                                    nbatch["image"][0, img_idx, :, :, :]
-                                    .detach()
-                                    .cpu()
-                                    .numpy()
+                                # Save images to visualize later if needed
+                                if DEBUG:
+                                    for img_idx in range(nbatch["image"].shape[1]):
+                                        img = (
+                                            nbatch["image"][0, img_idx, :, :, :]
+                                            .detach()
+                                            .cpu()
+                                            .numpy()
+                                        )
+                                        img = (img * 255).astype(np.uint8)  # 3 x 480 x 640
+                                        img_pil = Image.fromarray(
+                                            np.transpose(img, (1, 2, 0))
+                                        )  # H x W x 3
+                                        os.makedirs(
+                                            "data/diffusion_training_vis", exist_ok=True
+                                        )
+                                        img_pil.save(
+                                            f"data/diffusion_training_vis/epoch{epoch_idx}_img{img_idx}.png"
+                                        )
+
+                                # sample noise to add to actions
+                                noise = torch.randn(
+                                    naction.shape, device=self.device
+                                )  # randn is random normal
+                                # sample a diffusion iteration for each data point
+                                # NOTE: What is this step doing? <- samples a random timestep to add noise up to.
+                                # this teaches the model to denoise from any timestep. more efficient than training on all timesteps,
+                                # because we know the mathematical relationship between any timestep in the diffusion process
+                                timesteps = torch.randint(
+                                    low=0,
+                                    high=self.noise_scheduler.config["num_train_timesteps"],
+                                    size=(B,),
+                                    device=self.device,
+                                ).long()
+
+                                # add noise to the clean images according to the noise magnitude at each diffusion iteration
+                                # (this is the forward diffusion process)
+                                noisy_actions = self.noise_scheduler.add_noise(
+                                    naction, noise, timesteps
                                 )
-                                img = (img * 255).astype(np.uint8)  # 3 x 480 x 640
-                                img_pil = Image.fromarray(
-                                    np.transpose(img, (1, 2, 0))
-                                )  # H x W x 3
-                                os.makedirs(
-                                    "data/diffusion_training_vis", exist_ok=True
-                                )
-                                img_pil.save(
-                                    f"data/diffusion_training_vis/epoch{epoch_idx}_img{img_idx}.png"
+
+                                # predict the noise
+                                noise_pred = self.model(
+                                    nimage, nagent_pos, noisy_actions, timesteps
                                 )
 
-                        # sample noise to add to actions
-                        noise = torch.randn(
-                            naction.shape, device=self.device
-                        )  # randn is random normal
-                        # sample a diffusion iteration for each data point
-                        # NOTE: What is this step doing? <- samples a random timestep to add noise up to.
-                        # this teaches the model to denoise from any timestep. more efficient than training on all timesteps,
-                        # because we know the mathematical relationship between any timestep in the diffusion process
-                        timesteps = torch.randint(
-                            low=0,
-                            high=self.noise_scheduler.config["num_train_timesteps"],
-                            size=(B,),
-                            device=self.device,
-                        ).long()
+                                # calculate loss
+                                loss_val = self.loss_fn(noise_pred, noise)
 
-                        # add noise to the clean images according to the noise magnitude at each diffusion iteration
-                        # (this is the forward diffusion process)
-                        noisy_actions = self.noise_scheduler.add_noise(
-                            naction, noise, timesteps
-                        )
+                                # logging
+                                loss_cpu = loss_val.item()
+                                epoch_loss.append(loss_cpu)
+                                t_epoch.set_postfix(loss=loss_cpu)
+                                # self.loss_per_ep[epoch_idx].append(loss_cpu)
+                                if WANDB:
+                                    wandb.log(
+                                        {
+                                            "train/loss": loss_cpu,
+                                            "train/vision_lr": self.lr_scheduler.get_last_lr()[0],
+                                            "train/noise_lr": self.lr_scheduler.get_last_lr()[1],
+                                            "train/epoch": epoch_idx,
+                                        }
+                                    )
 
-                        # predict the noise
-                        noise_pred = self.model(
-                            nimage, nagent_pos, noisy_actions, timesteps
-                        )
+                                # optimize
+                                loss_val.backward()
+                                self.optimizer.step()
+                                self.optimizer.zero_grad()
+                                # step lr scheduler every batch
+                                # this is different from standard pytorch behavior #NOTE: Understand why they are doing so
+                                self.lr_scheduler.step()
 
-                        # calculate loss
-                        loss_val = self.loss_fn(noise_pred, noise)
-
-                        # logging
-                        loss_cpu = loss_val.item()
-                        epoch_loss.append(loss_cpu)
-                        t_epoch.set_postfix(loss=loss_cpu)
-                        # self.loss_per_ep[epoch_idx].append(loss_cpu)
-                        if WANDB:
-                            wandb.log(
-                                {
-                                    "train/loss": loss_cpu,
-                                    "train/vision_lr": self.lr_scheduler.get_last_lr()[0],
-                                    "train/noise_lr": self.lr_scheduler.get_last_lr()[1],
-                                    "train/epoch": epoch_idx,
-                                }
-                            )
-
-                        # optimize
-                        loss_val.backward()
-                        self.optimizer.step()
-                        self.optimizer.zero_grad()
-                        # step lr scheduler every batch
-                        # this is different from standard pytorch behavior #NOTE: Understand why they are doing so
-                        self.lr_scheduler.step()
-
-                        # update Exponential Moving Average of the model weights
-                        self.ema.step(self.model.parameters())  # NOTE: Understand why.
+                                # update Exponential Moving Average of the model weights
+                                self.ema.step(self.model.parameters())  # NOTE: Understand why.
 
                 t_global.set_postfix(loss=np.mean(epoch_loss))
                 if WANDB:
