@@ -29,10 +29,10 @@ from diffusion_train import DiffusionModel, CLIPEncoder, OpenVisionEncoder
 def parse_config(config_path):
     """
     Parse configuration from YAML file.
-    
+
     Args:
         config_path: Path to config.yaml file (can be a string or Path object)
-        
+
     Returns:
         dict: Configuration dictionary with the following structure:
             {
@@ -61,31 +61,31 @@ def parse_config(config_path):
                 "debug": bool,
                 "device": str,
             }
-            
+
     Raises:
         FileNotFoundError: If config file doesn't exist
         yaml.YAMLError: If config file is invalid YAML
     """
     config_path = Path(config_path)
-    
+
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
-    
+
     if not config_path.is_file():
         raise ValueError(f"Config path is not a file: {config_path}")
-    
+
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-    
+
     if config is None:
         raise ValueError(f"Config file is empty: {config_path}")
-    
+
     # Validate config structure and set defaults for missing keys
     validated_config = {
         "training": config.get("training", {}),
         "model": config.get("model", {}),
     }
-    
+
     return validated_config
 
 class InferDiffusIn:
@@ -177,7 +177,7 @@ class InferDiffusIn:
                     for i, x in enumerate(obs_deque):
                         os.makedirs("data/local_debug", exist_ok=True)
                         Image.fromarray(x["images"]["top"]).save(f"data/local_debug/obs_deque_current_{i}.png")
-                    
+
 
                 # normalize observation
                 nagent_poses = (agent_poses - self.stats["qpos_mean"]) / self.stats[
@@ -212,7 +212,7 @@ class InferDiffusIn:
                     if self.debug:
                         # Visualize the initial noisy action
                         self.visualize_actions(naction[0].cpu().numpy(), save_path="data/local_debug/initial_noisy_action.png")
-                    
+
                     # init scheduler
                     # NOTE: TRI example uses the same scheduler for training and inference.
                     # may consider using different schedulers, eg DDIM, or reference https://arxiv.org/pdf/2301.10677
@@ -240,7 +240,7 @@ class InferDiffusIn:
                 if self.debug:
                     # Visualize the initial noisy action
                     self.visualize_actions(action_pred, save_path="data/local_debug/denoised_action.png")
-                
+
                 # only take execution_horizon number of actions
                 action = action_pred[
                     : self.execution_horizon, :
@@ -330,7 +330,7 @@ class InferDiffusIn:
 if __name__ == "__main__":
     env = act_sim_env.make_sim_env("sim_insertion")
     parser = argparse.ArgumentParser(description="Diffusion Policy Inference")
-    
+
     # Training arguments
     parser.add_argument("--file_dir_path", type=str, required=True,
                         help="Path to the config.yaml file")

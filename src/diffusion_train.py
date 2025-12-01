@@ -275,9 +275,9 @@ class TrainDiffusIn:
                         # Find valid start and end indices for observation and action sequences from the ORIGINAL unpadded data
                         # Using different start and end indices for each sample in the batch
                         # so that the model does not overfit to fixed positions in the sequences
-                        start_index_action = np.random.randint(self.obs_horizon, nbatch["lengths"] - self.action_horizon)      
+                        start_index_action = np.random.randint(self.obs_horizon, nbatch["lengths"] - self.action_horizon)
                         start_index_obs = start_index_action - self.obs_horizon
-                        
+
                         #TODO: Can be moved into dataloader for efficiency
                         indices_arr = []
                         B = nbatch["image"].shape[0]
@@ -287,7 +287,7 @@ class TrainDiffusIn:
                         stacked_indices = np.tile(indices, (B, 1))
                         for i in range(stacked_indices.shape[0]):
                             np.random.shuffle(stacked_indices[i])
-                        
+
                         batch_loss = 0.0
                         with tqdm(range(stacked_indices.shape[1]), desc="Sequence", leave=False) as t_seq:
                             for i in range(stacked_indices.shape[1]):
@@ -297,7 +297,7 @@ class TrainDiffusIn:
                                 # Create indices between start and end indices for each element in the batch
                                 obs_idx = start_index_obs[:, None] + np.arange(self.obs_horizon)[None, :]
                                 action_idx = start_index_action[:, None] + np.arange(self.action_horizon)[None, :]
-                                
+
                                 # Splice out the relevant sequences using the above indices
                                 nimage = nbatch["image"][np.arange(B)[:, None], obs_idx].to(self.device)
                                 nagent_pos = nbatch["q_pos"][np.arange(B)[:, None], obs_idx].to(self.device)
@@ -353,7 +353,7 @@ class TrainDiffusIn:
                                 loss_val = self.loss_fn(noise_pred, noise)
 
                                 batch_loss += loss_val
-                        
+
                         # optimize
                         # this is different from standard pytorch behavior #NOTE: Understand why they are doing so
                         batch_loss = batch_loss / stacked_indices.shape[1]
@@ -365,7 +365,7 @@ class TrainDiffusIn:
                         self.lr_scheduler.step()
 
                         self.ema.step(self.model.parameters())
-                        
+
                         # logging
                         loss_cpu = batch_loss.item()
                         epoch_loss.append(loss_cpu)
@@ -417,7 +417,7 @@ class TrainDiffusIn:
                     print(
                         f"Saved best_model_checkpoint at {self.files_output_path}/best_diffusion_model_e{epoch_idx}.pth"
                     )
-                    
+
                 if self.track_wandb:
                     for wandb_file in os.listdir(self.files_output_path):
                         wandb.save(f"{self.files_output_path}/{wandb_file}")
@@ -426,7 +426,7 @@ class TrainDiffusIn:
 if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Train Diffusion Policy")
-    
+
     # Training arguments
     parser.add_argument("--num-epochs", type=int, default=100,
                        help="Number of training epochs (default: 100)")
@@ -438,7 +438,7 @@ if __name__ == "__main__":
                        help="Number of diffusion timesteps (default: 100)")
     parser.add_argument("--ema-power", type=float, default=0.75,
                        help="EMA power (default: 0.75)")
-    
+
     # Model arguments
     parser.add_argument("--state-dim", type=int, default=14,
                        help="State dimension (default: 14)")
@@ -453,11 +453,11 @@ if __name__ == "__main__":
     parser.add_argument("--vision-encoder", type=str, default="OpenVision-vit-tiny",
                        choices=["OpenVision-vit-tiny", "CLIP"],
                        help="Vision encoder type (default: OpenVision-vit-tiny)")
-    
+
     # Path arguments
     parser.add_argument("--dataset-path", type=str, default="data",
                        help="Path to dataset directory (default: data)")
-    
+
     # WandB arguments
     parser.add_argument("--no-track", action="store_true",
                        help="Do NOT track on WandB")
@@ -465,23 +465,23 @@ if __name__ == "__main__":
                        help="WandB entity name (default: mrsd-smores)")
     parser.add_argument("--wandb-project", type=str, default="diffusIn-training",
                        help="WandB project name (default: diffusIn-training)")
-    
+
     # Other arguments
     parser.add_argument("--debug", action="store_true", default=False,
                        help="Enable debug mode (default: False)")
     parser.add_argument("--device", type=str, default="auto",
                        choices=["auto", "cuda", "cpu"],
                        help="Device to use (default: auto)")
-    
+
     args = parser.parse_args()
-    
+
     dataset_path = Path(args.dataset_path).absolute()
     if not dataset_path.exists():
         print(f"Warning: Dataset path {dataset_path} does not exist")
     files_output_path = Path(dataset_path / f"diffusion_policy_models_{time.strftime('%Y%m%d_%H%M%S')}").absolute()
-    
+
     DEBUG = args.debug
-    
+
     # Device selection
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -498,7 +498,7 @@ if __name__ == "__main__":
 
     # Compute observation_dim from vision_feature_dim + state_dim
     args.observation_dim = args.vision_feature_dim + args.state_dim
-    
+
     # Save configuration to YAML file in output directory
     config_dict = {
         "training": {
@@ -520,9 +520,9 @@ if __name__ == "__main__":
         }
     }
     save_config(config_dict, files_output_path)
-    
+
     print(f"Using device: {device}")
-    
+
     # Initialize model
     model = DiffusionModel(
         state_dim=args.state_dim,
@@ -532,13 +532,13 @@ if __name__ == "__main__":
         vision_encoder=vision_encoder,
         device=device,
     )
-    
+
     # Dataset and Dataloader
     # NOTE: Cannot pass num_episodes = 1 because train/val split fails
     train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_data(
         dataset_path, args.num_episodes, ["top"], args.batch_size, 1
     )
-    
+
     # Initialize WandB if tracking is enabled
     if not args.no_track:
         wandb_config = {
@@ -556,7 +556,7 @@ if __name__ == "__main__":
             "vision_encoder": args.vision_encoder,
         }
         init_wandb(entity=args.wandb_entity, project=args.wandb_project, config_dict=wandb_config)
-    
+
     # Initialize trainer
     trainer = TrainDiffusIn(
         model=model,
