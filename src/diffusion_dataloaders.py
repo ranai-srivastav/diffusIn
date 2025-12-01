@@ -85,7 +85,6 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
         return values
 
-
 def get_norm_stats(dataset_dir, episode_ids):
     all_qpos_data = []
     all_action_data = []
@@ -144,6 +143,9 @@ def get_norm_stats(dataset_dir, episode_ids):
 
     return stats
 
+def custom_collate_fn(batch):
+    # pad all the sequences in the batch to the same length
+    batch_size = len(batch)
 
 def load_data(
     dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val
@@ -175,6 +177,7 @@ def load_data(
         num_workers=4,
         prefetch_factor=1,
         persistent_workers=True,
+        collate_fn=custom_collate_fn,
     )
     val_dataloader = DataLoader(
         val_dataset,
@@ -184,6 +187,7 @@ def load_data(
         num_workers=4,
         prefetch_factor=1,
         persistent_workers=True,
+        collate_fn=custom_collate_fn,
     )
 
     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
