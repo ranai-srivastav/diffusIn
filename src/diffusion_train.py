@@ -682,7 +682,7 @@ if __name__ == "__main__":
         diffusion_timesteps=NUM_TRAIN_TIMESTEPS,
         num_epochs=NUM_EPOCHS,
     )
-    # trainer.train()
+    trainer.train()
 
     env = act_sim_env.make_sim_env("sim_insertion")
     trainer.eval(env, max_steps=125, render=True)
