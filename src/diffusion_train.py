@@ -62,6 +62,9 @@ DATASET_PATH = (
     else "DATASET IS AS LOST AS YOU ARE - NOT FOUND IN THE GIVEN PATH"
 )
 FILES_OUTPUT_PATH = Path("data/diffusion_policy_models2").absolute()
+# Change the name of the pth file here
+VIS_WEIGHTS_FILENAME = "best_diffusion_model_e61.pth"
+CHECKPOINT_PATH = FILES_OUTPUT_PATH / VIS_WEIGHTS_FILENAME
 BATCH_SIZE = 1
 NUM_TRAIN_TIMESTEPS = 100
 VISION_FEATURE_DIM = 192
@@ -71,23 +74,25 @@ OBSERVATION_DIM = VISION_FEATURE_DIM + STATE_DIM
 ACTION_DIM = 14
 ACTION_HORIZON = 8
 EXECUTION_HORIZON = 4
-DEBUG = False
+DEBUG = True
+WANDB = False
 
-wandb.login()
-wandb.init(entity="mrsd-smores", project="diffusIn-training")
-config = {
-    "num_epochs": NUM_EPOCHS,
-    "num_episodes": NUM_EPISODES,
-    "batch_size": BATCH_SIZE,
-    "num_train_timesteps": NUM_TRAIN_TIMESTEPS,
-    "vision_feature_dim": VISION_FEATURE_DIM,
-    "state_dim": STATE_DIM,
-    "observation_horizon": OBSERVATION_HORIZON,
-    "observation_dim": OBSERVATION_DIM,
-    "action_dim": ACTION_DIM,
-    "action_horizon": ACTION_HORIZON,
-    "vision_encoder": "OpenVision-vit-tiny-patch16-384",
-}
+if WANDB==True:
+    wandb.login()
+    wandb.init(entity="mrsd-smores", project="diffusIn-training")
+    config = {
+        "num_epochs": NUM_EPOCHS,
+        "num_episodes": NUM_EPISODES,
+        "batch_size": BATCH_SIZE,
+        "num_train_timesteps": NUM_TRAIN_TIMESTEPS,
+        "vision_feature_dim": VISION_FEATURE_DIM,
+        "state_dim": STATE_DIM,
+        "observation_horizon": OBSERVATION_HORIZON,
+        "observation_dim": OBSERVATION_DIM,
+        "action_dim": ACTION_DIM,
+        "action_horizon": ACTION_HORIZON,
+        "vision_encoder": "OpenVision-vit-tiny-patch16-384",
+    }
 
 # Action space:      [left_arm_qpos (6),             # absolute joint position
 #                         left_gripper_positions (1),    # normalized gripper position (0: close, 1: open)
@@ -383,14 +388,15 @@ class TrainDiffusIn:
                         epoch_loss.append(loss_cpu)
                         t_epoch.set_postfix(loss=loss_cpu)
                         # self.loss_per_ep[epoch_idx].append(loss_cpu)
-                        wandb.log(
-                            {
-                                "train/loss": loss_cpu,
-                                "train/vision_lr": self.lr_scheduler.get_last_lr()[0],
-                                "train/noise_lr": self.lr_scheduler.get_last_lr()[1],
-                                "train/epoch": epoch_idx,
-                            }
-                        )
+                        if WANDB:
+                            wandb.log(
+                                {
+                                    "train/loss": loss_cpu,
+                                    "train/vision_lr": self.lr_scheduler.get_last_lr()[0],
+                                    "train/noise_lr": self.lr_scheduler.get_last_lr()[1],
+                                    "train/epoch": epoch_idx,
+                                }
+                            )
 
                         # optimize
                         loss_val.backward()
@@ -404,7 +410,8 @@ class TrainDiffusIn:
                         self.ema.step(self.model.parameters())  # NOTE: Understand why.
 
                 t_global.set_postfix(loss=np.mean(epoch_loss))
-                wandb.log({"train/epoch_loss": np.mean(epoch_loss)})
+                if WANDB:
+                    wandb.log({"train/epoch_loss": np.mean(epoch_loss)})
 
                 # Per trajectory loss over time
                 # for traj_idx in range(NUM_EPISODES):
@@ -438,21 +445,21 @@ class TrainDiffusIn:
                     print(
                         f"Saved best_model_checkpoint at {FILES_OUTPUT_PATH}/best_diffusion_model_e{epoch_idx}.pth"
                     )
-
-        for wandb_file in os.listdir(FILES_OUTPUT_PATH):
-            wandb.save(f"{FILES_OUTPUT_PATH}/{wandb_file}")
+        if WANDB:
+            for wandb_file in os.listdir(FILES_OUTPUT_PATH):
+                wandb.save(f"{FILES_OUTPUT_PATH}/{wandb_file}")
 
     def eval(self, env, max_steps=500, render=False):  # default values taken from TRI example, should change
         """Evaluation Loop for Diffusion Model"""
         # |o|o|o|o|o|o|o|o|                 observations: 8
         # |p|p|p|p|p|p|p|p|                 action predictions: 8
         # | | | | | | | | |a|a|a|a|a|       actions executed: 4
-
+        print(f"Device: {self.device}")
         pred_horizon = self.action_horizon
 
         # Load the model checkpoint
         self.ema_nets = self.model
-        checkpoint_path = FILES_OUTPUT_PATH / "diffusion_model_checkpoint.pth"
+        checkpoint_path = CHECKPOINT_PATH
         if not checkpoint_path.exists():
             print(f"Checkpoint not found at {checkpoint_path}")
             return
@@ -465,6 +472,7 @@ class TrainDiffusIn:
         peg_pose, socket_pose = act_utils.sample_insertion_pose()
         act_sim_env.BOX_POSE[0] = np.concatenate([peg_pose, socket_pose])
         ts = env.reset()
+        # TODO: Check if "angle" camera is the right one since training is done with "top" camera
         onscreen_cam = "angle"
 
         # Init obs deque with initial observations
@@ -487,6 +495,13 @@ class TrainDiffusIn:
                 # stack the last obs_horizon number of observations
                 images = np.stack([x["images"]["top"] for x in obs_deque])
                 agent_poses = np.stack([x["qpos"] for x in obs_deque])
+
+                if DEBUG:
+                    # Visualize current images in obs_deque
+                    for i, x in enumerate(obs_deque):
+                        os.makedirs("data/local_debug", exist_ok=True)
+                        Image.fromarray(x["images"]["top"]).save(f"data/local_debug/obs_deque_current_{i}.png")
+                    
 
                 # normalize observation
                 nagent_poses = (agent_poses - self.stats["qpos_mean"]) / self.stats[
@@ -518,6 +533,10 @@ class TrainDiffusIn:
                     )
                     naction = noisy_action
 
+                    if DEBUG:
+                        # Visualize the initial noisy action
+                        self.visualize_actions(naction[0].cpu().numpy(), save_path="data/local_debug/initial_noisy_action.png")
+                    
                     # init scheduler
                     # NOTE: TRI example uses the same scheduler for training and inference.
                     # may consider using different schedulers, eg DDIM, or reference https://arxiv.org/pdf/2301.10677
@@ -542,6 +561,10 @@ class TrainDiffusIn:
                     naction * self.stats["action_std"] + self.stats["action_mean"]
                 )
 
+                if DEBUG:
+                    # Visualize the initial noisy action
+                    self.visualize_actions(action_pred, save_path="data/local_debug/denoised_action.png")
+                
                 # only take execution_horizon number of actions
                 action = action_pred[
                     : self.execution_horizon, :
@@ -583,7 +606,52 @@ class TrainDiffusIn:
 
         if render:
             # save vis as gif
-            imageio.mimsave(f"data/gifs_diffusion.gif", imgs, fps=33)
+            os.makedirs("data/diffusion_eval_vis", exist_ok=True)
+            imageio.mimsave(f"data/diffusion_eval_vis/{VIS_WEIGHTS_FILENAME[:-4]}.gif", imgs, fps=33)
+
+    def visualize_actions(self, actions, save_path="action_visualization.png"):
+        """Visualize action sequences as line plots for each action dimension"""
+        import matplotlib.pyplot as plt
+
+        # Create side-by-side subplots: first 7 action dims on the left, remaining on the right
+        action_horizon_local, action_dim_local = actions.shape
+        fig, axes = plt.subplots(1, 2, figsize=(15, 5), sharex=True)
+
+        t = np.arange(action_horizon_local)
+        left_dims = range(min(7, action_dim_local))
+        right_dims = range(7, action_dim_local)
+
+        for d in left_dims:
+            axes[0].plot(t, actions[:, d], label=f"Action Dim {d}")
+        axes[0].set_xlabel("Timestep")
+        axes[0].set_ylabel("Action Value")
+        axes[0].set_title("Left arm")
+        axes[0].legend()
+        axes[0].grid(True)
+
+        for d in right_dims:
+            axes[1].plot(t, actions[:, d], label=f"Action Dim {d}")
+        axes[1].set_xlabel("Timestep")
+        axes[1].set_ylabel("Action Value")
+        axes[1].set_title("Right arm")
+        axes[1].legend()
+        axes[1].grid(True)
+
+        fig.tight_layout()
+        fig.savefig(save_path)
+        plt.close(fig)
+
+        # action_horizon, action_dim = actions.shape
+        # plt.figure(figsize=(15, 5))
+        # for dim in range(action_dim):
+        #     plt.plot(range(action_horizon), actions[:, dim], label=f"Action Dim {dim}")
+        # plt.xlabel("Timestep")
+        # plt.ylabel("Action Value")
+        # plt.title("Action Sequence Visualization")
+        # plt.legend()
+        # plt.grid()
+        # plt.savefig(save_path)
+        # plt.close()
 
 
 if __name__ == "__main__":
@@ -614,7 +682,7 @@ if __name__ == "__main__":
         diffusion_timesteps=NUM_TRAIN_TIMESTEPS,
         num_epochs=NUM_EPOCHS,
     )
-    trainer.train()
+    # trainer.train()
 
     env = act_sim_env.make_sim_env("sim_insertion")
-    trainer.eval(env, max_steps=100, render=True)
+    trainer.eval(env, max_steps=125, render=True)
