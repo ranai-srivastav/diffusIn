@@ -302,27 +302,26 @@ class TrainDiffusIn:
 
                 with tqdm(self.train_dataloader, desc="Batch", leave=False) as t_epoch:
                     for nbatch in t_epoch:
-                        end_index_obs = np.random.randint(
-                            self.obs_horizon,
-                            nbatch["image"].shape[1] - self.action_horizon,
-                        )
-                        start_index_obs = end_index_obs - self.obs_horizon
-                        assert (
-                            start_index_obs >= 0
-                        ), "start_index_obs is negative!"  # sanity check
+                        # Find valid start and end indices for observation and action sequences from the ORIGINAL unpadded data
+                        # Using different start and end indices for each sample in the batch
+                        # so that the model does not overfit to fixed positions in the sequences
+                        start_index_action = np.random.randint(self.obs_horizon, nbatch["lengths"] - self.action_horizon)      
+                        start_index_obs = start_index_action - self.obs_horizon
+                        # start_index_action = end_index_obs
+                        # end_index_action = start_index_action + self.action_horizon
 
-                        start_index_action = end_index_obs
-                        end_index_action = start_index_action + self.action_horizon
-                        assert (
-                            end_index_action < nbatch["action"].shape[1]
-                        ), "end_index_action exceeds episode length!"  # sanity check
-                        # print(start_index_action, end_index_action, start_index_obs, end_index_obs)
+                        # Using numpy advanced indexing to select variable length sequences from the padded batch
 
-                        # device transfer
-                        # load a batch of data from expert trajectory: image, agent_pos, action
-                        nimage = nbatch["image"][:, start_index_obs:end_index_obs].to(
-                            self.device
-                        )  # (batch_size, obs_horizon, 3, 480, 640)
+                        B = nbatch["image"].shape[0]
+                        # Create indices between start and end indices for each element in the batch
+                        obs_idx = start_index_obs[:, None] + np.arange(self.obs_horizon)[None, :]
+                        action_idx = start_index_action[:, None] + np.arange(self.action_horizon)[None, :]
+                        
+                        # Splice out the relevant sequences using the above indices
+                        nimage = nbatch["image"][np.arange(B)[:, None], obs_idx].to(self.device)
+                        nagent_pos = nbatch["q_pos"][np.arange(B)[:, None], obs_idx].to(self.device)
+                        naction = nbatch["action"][np.arange(B)[:, None], action_idx].to(self.device)
+
                         # Save images to visualize later if needed
                         if DEBUG:
                             for img_idx in range(nbatch["image"].shape[1]):
@@ -342,18 +341,6 @@ class TrainDiffusIn:
                                 img_pil.save(
                                     f"data/diffusion_training_vis/epoch{epoch_idx}_img{img_idx}.png"
                                 )
-
-                        nagent_pos = nbatch["q_pos"][
-                            :, start_index_obs:end_index_obs
-                        ].to(
-                            self.device
-                        )  # Shape: (batch_size, obs_horizon, state_dim)
-                        naction = nbatch["action"][
-                            :, start_index_action:end_index_action
-                        ].to(
-                            self.device
-                        )  # Shape: (batch_size, action_horizon, action_dim)
-                        B = nagent_pos.shape[0]  # batch size
 
                         # sample noise to add to actions
                         noise = torch.randn(
