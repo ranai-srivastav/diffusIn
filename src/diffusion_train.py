@@ -503,8 +503,8 @@ if __name__ == "__main__":
 
     # Compute observation_dim from vision_feature_dim + state_dim
     args.observation_dim = args.vision_feature_dim + args.state_dim
-    
-    # Save configuration to YAML file in output directory
+
+    # Prepare base configuration (we will save after loading dataset stats)
     config_dict = {
         "training": {
             "num_epochs": args.num_epochs,
@@ -527,8 +527,6 @@ if __name__ == "__main__":
             "vision_encoder": args.vision_encoder,
         }
     }
-    save_config(config_dict, files_output_path)
-    
     print(f"Using device: {device}")
     # Initialize model
     model = DiffusionModel(
@@ -550,7 +548,23 @@ if __name__ == "__main__":
     train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_chunked_data(
         dataset_path, args.num_episodes, ["top"], args.batch_size, 1, args.pred_horizon, args.obs_horizon
     )
-    
+
+    print(f"Dataset stats: {norm_dataset_stats}")
+    print(f"Files output path: {files_output_path}")
+
+    # Add dataset_stats to config and save
+    dataset_stats_serialized = {
+        "action_mean": np.asarray(norm_dataset_stats["action_mean"]).tolist(),
+        "action_std": np.asarray(norm_dataset_stats["action_std"]).tolist(),
+        "qpos_mean": np.asarray(norm_dataset_stats["qpos_mean"]).tolist(),
+        "qpos_std": np.asarray(norm_dataset_stats["qpos_std"]).tolist(),
+        "qvel_mean": np.asarray(norm_dataset_stats["qvel_mean"]).tolist(),
+        "qvel_std": np.asarray(norm_dataset_stats["qvel_std"]).tolist(),
+    }
+
+    config_dict["dataset_stats"] = dataset_stats_serialized
+    save_config(config_dict, files_output_path)
+
     # Initialize WandB if tracking is enabled
     if not args.no_track:
         wandb_config = {
