@@ -1,0 +1,16 @@
+{
+  "python.envFile": "${workspaceFolder}/.vscode/.env",
+  "python.linting.pylintEnabled": true,
+  "python.linting.enabled": true,
+  "pylint.args": [
+    "--init-hook",
+    "import sys, os; p=os.environ.get('PYTHONPATH','');\n[sys.path.append(s) for s in p.split(os.pathsep) if s]"
+  ],
+  "python.defaultInterpreterPath": "/home/stryder/miniconda3/envs/diffusin/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/include",
+    "${workspaceFolder}/include/act",
+    "${workspaceFolder}/include/diffusion_policy",
+    "${workspaceFolder}/include/OpenVision/src"
+  ],
+}
