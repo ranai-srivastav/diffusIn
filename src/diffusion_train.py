@@ -65,18 +65,6 @@ def save_config(config_dict, output_path):
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
     print(f"Saved configuration to {config_file}")
 
-def dict_apply(
-        x: Dict[str, torch.Tensor], 
-        func: Callable[[torch.Tensor], torch.Tensor]
-        ) -> Dict[str, torch.Tensor]:
-    result = dict()
-    for key, value in x.items():
-        if isinstance(value, dict):
-            result[key] = dict_apply(value, func)
-        else:
-            result[key] = func(value)
-    return result
-
 # Action space:      [left_arm_qpos (6),             # absolute joint position
 #                         left_gripper_positions (1),    # normalized gripper position (0: close, 1: open)
 #                         right_arm_qpos (6),            # absolute joint position
@@ -542,7 +530,6 @@ if __name__ == "__main__":
     save_config(config_dict, files_output_path)
     
     print(f"Using device: {device}")
-    
     # Initialize model
     model = DiffusionModel(
         state_dim=args.state_dim,
@@ -585,17 +572,6 @@ if __name__ == "__main__":
             "device": str(device),
         }
         init_wandb(entity=args.wandb_entity, project=args.wandb_project, config_dict=wandb_config)
-    
-    print(f"Using device: {device}")
-    # Initialize model
-    model = DiffusionModel(
-        state_dim=args.state_dim,
-        obs_dim=args.observation_dim,
-        action_dim=args.action_dim,
-        obs_horizon=args.obs_horizon,
-        vision_encoder=vision_encoder,
-        device=device,
-    )
     
     # Initialize trainer
     trainer = TrainDiffusIn(
