@@ -331,7 +331,7 @@ class TrainDiffusIn:
         )
 
         # calculate loss
-        loss = self.loss_fn(noise_pred, noise, reduction='none')
+        loss = self.loss_fn(noise_pred, noise)
         loss = loss * loss_mask.type(loss.dtype)
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss.mean()
@@ -385,7 +385,7 @@ class TrainDiffusIn:
                     wandb.log({"train/epoch_loss": np.mean(epoch_loss)})
 
                 
-                if epoch_idx % self.save_every == 0:
+                if (epoch_idx+1) % self.save_every == 0:
                     # Save this model
                     self.ema.copy_to(self.ema_nets.parameters())
                     torch.save(
@@ -424,12 +424,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Diffusion Policy")
     
     # Training arguments
-    parser.add_argument("--num-epochs", type=int, default=1000,
+    parser.add_argument("--num-epochs", type=int, default=100,
                        help="Number of training epochs (default: 100)")
     parser.add_argument("--num-episodes", type=int, default=100,
                        help="Number of episodes to load from dataset (default: 100)")
-    parser.add_argument("--batch-size", type=int, default=4,
-                       help="Batch size for training (default: 4)")
+    parser.add_argument("--batch-size", type=int, default=32,
+                       help="Batch size for training (default: 32)")
     parser.add_argument("--num-train-timesteps", type=int, default=100,
                        help="Number of diffusion timesteps (default: 100)")
     parser.add_argument("--ema-power", type=float, default=0.75,
@@ -469,8 +469,8 @@ if __name__ == "__main__":
                        help="WandB project name (default: diffusIn-training)")
     
     # Other arguments
-    parser.add_argument("--save-every", type=int, default=50,
-                       help="Save model every N epochs (default: 50)")
+    parser.add_argument("--save-every", type=int, default=10,
+                       help="Save model every N epochs (default: 10)")
     parser.add_argument("--debug", action="store_true", default=False,
                        help="Enable debug mode (default: False)")
     parser.add_argument("--device", type=str, default="auto",
@@ -542,7 +542,7 @@ if __name__ == "__main__":
 
     model.to(device=device)
     print("Initialized Diffusion Model:")
-    print(model)
+    # print(model)
     
     # Dataset and Dataloader
     # NOTE: Cannot pass num_episodes = 1 because train/val split fails
