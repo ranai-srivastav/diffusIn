@@ -8,6 +8,10 @@ from tqdm import tqdm
 from PIL import Image
 import yaml
 
+
+CAMERA_KEYS = ("top", "angle", "vis")  # available in env observations
+FPS = 20
+
 sys.path.extend(
     [
         str(Path("include").resolve()),
@@ -59,7 +63,22 @@ def parse_config(config_path):
         "training": config.get("training", {}),
         "model": config.get("model", {}),
     }
-    
+
+    # Load dataset stats
+    dataset_stats = config.get("dataset_stats", None)
+    if dataset_stats is None:
+        raise ValueError(f"Config file does not contain dataset stats: {config_path}")
+
+    stats = {
+        "action_mean": np.asarray(dataset_stats.get("action_mean")),
+        "action_std": np.asarray(dataset_stats.get("action_std")),
+        "qpos_mean": np.asarray(dataset_stats.get("qpos_mean")),
+        "qpos_std": np.asarray(dataset_stats.get("qpos_std")),
+        "qvel_mean": np.asarray(dataset_stats.get("qvel_mean")),
+        "qvel_std": np.asarray(dataset_stats.get("qvel_std")),
+    }
+    validated_config["dataset_stats"] = stats
+
     return validated_config
 
 class InferDiffusIn:
@@ -71,9 +90,11 @@ class InferDiffusIn:
         self.pred_horizon = config["model"].get("pred_horizon", 8)
         self.execution_horizon = config["model"].get("execution_horizon", 4)
         self.obs_horizon = config["model"].get("observation_horizon", 2)
+        self.stats = config.get("dataset_stats", None)
         self.debug = debug
         self.file_path = file_path
         self.checkpoint_name = checkpoint_name
+
 
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=self.diffusion_timesteps,
@@ -109,6 +130,31 @@ class InferDiffusIn:
         self.ema_nets.load_state_dict(checkpoint["model_state_dict"])
         print(f"Loaded model checkpoint from {checkpoint_path}")
 
+    def _capture_views(self, ts):
+        """Capture frames from the environment observations"""
+        obs_imgs = ts.observation["images"]
+        imgs = []
+        for cam in CAMERA_KEYS:
+            img = obs_imgs[cam]
+            if img.dtype != np.uint8:
+                img = np.clip(img, 0, 255).astype(np.uint8)
+            imgs.append(img)
+        return imgs
+
+    def _stack_vertical(self, imgs):
+        """Stack images vertically"""
+        h_min = min(im.shape[0] for im in imgs)
+        w_min = min(im.shape[1] for im in imgs)
+        imgs_cropped = [im[:h_min, :w_min, :] for im in imgs]
+        stacked = np.concatenate(imgs_cropped, axis=0)
+        return stacked
+
+    def _get_frame_from_env(self, ts):
+        """Get frame from environment observations"""
+        imgs = self._capture_views(ts)
+        stacked = self._stack_vertical(imgs)
+        return stacked
+
     def eval(self, env, max_steps=500, render=False):  # default values taken from TRI example, should change
         """Evaluation Loop for Diffusion Model"""
 #         in training:
@@ -127,11 +173,10 @@ class InferDiffusIn:
         self.ema_nets.eval()
 
         # Reset environment with random peg and socket pose
+        # TODO: Initialize env with the same peg and socket pose as the training data
         peg_pose, socket_pose = act_utils.sample_insertion_pose()
         act_sim_env.BOX_POSE[0] = np.concatenate([peg_pose, socket_pose])
         ts = env.reset()
-        # TODO: Check if "angle" camera is the right one since training is done with "top" camera
-        onscreen_cam = "angle"
 
         # Init obs deque with initial observations
         # obs keys:'qpos', 'qvel', 'env_state', 'images'
@@ -139,10 +184,10 @@ class InferDiffusIn:
         obs = ts.observation
         obs_deque = collections.deque([obs] * self.obs_horizon, maxlen=self.obs_horizon)
 
+        frames = []
         if render:
-            imgs = [env._physics.render(height=480, width=640, camera_id=onscreen_cam)]
-        else:
-            imgs = []
+            frames.append(self._get_frame_from_env(ts))
+
         rewards = []
         done = False
         step_idx = 0
@@ -242,11 +287,7 @@ class InferDiffusIn:
                     rewards.append(reward)
 
                     if render:
-                        imgs.append(
-                            env._physics.render(
-                                height=480, width=640, camera_id=onscreen_cam
-                            )
-                        )
+                        frames.append(self._get_frame_from_env(ts))
 
                     # update progress bar
                     step_idx += 1
@@ -264,7 +305,10 @@ class InferDiffusIn:
 
         if render:
             # save vis as gif
-            imageio.mimsave(f"data/eval_vis_{self.checkpoint_name}.gif", imgs, fps=15)
+            save_path = f"data/eval_vis_{self.checkpoint_name}.gif"
+            # NOTE: The original hz is 50, but we set it to a custom value here.
+            imageio.mimsave(save_path, frames, fps=FPS, loop=0)  # loop=0 means infinite loop
+            print(f"Saved GIF to {save_path}")
 
     def visualize_actions(self, actions, save_path="action_visualization.png"):
         """Visualize action sequences as line plots for each action dimension"""
@@ -319,4 +363,4 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_name", type=str, default=None,)
     args = parser.parse_args()
     evaluator = InferDiffusIn(file_path=args.file_dir_path, checkpoint_name=args.checkpoint_name)
-    evaluator.eval(env, max_steps=500, render=True)
+    evaluator.eval(env, max_steps=20, render=True)
