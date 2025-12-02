@@ -4,7 +4,7 @@ import glob
 import h5py
 import torch
 from torch.utils.data import DataLoader
-
+from utils import dict_apply
 import IPython
 
 e = IPython.embed
@@ -84,6 +84,77 @@ class EpisodicDataset(torch.utils.data.Dataset):
         }
 
         return values
+    
+class ChunkedSequencesDataset(torch.utils.data.Dataset):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, chunk_size, action_horizon):
+        super(ChunkedSequencesDataset, self).__init__()
+
+        self.episode_ids = episode_ids
+        self.dataset_dir = dataset_dir
+        self.camera_names = camera_names
+        self.norm_stats = norm_stats
+        self.is_sim = None
+        self.chunk_size = chunk_size
+        self.num_chunks = 0
+        self.action_horizon = action_horizon
+
+        # Get filepaths for all episodes
+        human_episodes = sorted(
+            glob.glob(os.path.join(dataset_dir, "sim_insertion_human", "*.hdf5"))
+        )
+        scripted_episodes = sorted(
+            glob.glob(os.path.join(dataset_dir, "sim_insertion_scripted", "*.hdf5"))
+        )
+        all_episode_paths = human_episodes + scripted_episodes
+        self.episode_paths = [all_episode_paths[i] for i in episode_ids]
+        self.episode_lengths = []
+        
+        # Calculate length of all chunks across episodes
+        for path in self.episode_paths:
+            with h5py.File(path, "r") as root:
+                episode_len = root["/action"].shape[0]
+                self.episode_lengths.append(episode_len)
+                num_full_chunks = (episode_len - self.action_horizon) // self.chunk_size
+                self.num_chunks += num_full_chunks
+
+        # Create random index mapping from chunk index to (episode index, start index)
+        self.index_mapping = []
+        for ep_idx, ep_len in enumerate(self.episode_lengths):
+            num_full_chunks = (ep_len - self.action_horizon) // self.chunk_size
+            for chunk_idx in range(1, num_full_chunks):
+                start_idx = chunk_idx * self.chunk_size
+                self.index_mapping.append((ep_idx, start_idx))
+
+    def __len__(self):
+        return len(self.index_mapping)
+
+    def __getitem__(self, index):
+        if index < 0 or index >= len(self.index_mapping):
+            raise IndexError("Index out of range, got {}".format(index))
+        ep_idx, start_idx = self.index_mapping[index]
+        episode_path = self.episode_paths[ep_idx]
+        data_dict = {}
+        with h5py.File(episode_path, "r") as root:
+            is_sim = root.attrs["sim"]
+
+            data_dict["q_pos"] = root["/observations/qpos"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+            data_dict["q_vel"] = root["/observations/qvel"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+            data_dict["image"] = root["/observations/images/top"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+            data_dict["action"] = root["/action"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+
+        # construct observations
+        data_dict = dict_apply(data_dict, lambda x: torch.from_numpy(x).float())
+
+        # channel last
+        data_dict["image"] = torch.einsum("k h w c -> k c h w", data_dict["image"])
+
+        # normalize data
+        data_dict["image"] = data_dict["image"] / 255.0
+        data_dict["action"] = (data_dict["action"] - self.norm_stats["action_mean"]) / self.norm_stats["action_std"]
+        data_dict["q_pos"] = (data_dict["q_pos"] - self.norm_stats["qpos_mean"]) / self.norm_stats["qpos_std"]
+        data_dict["q_vel"] = (data_dict["q_vel"] - self.norm_stats["qvel_mean"]) / self.norm_stats["qvel_std"]
+
+        return data_dict
 
 def get_norm_stats(dataset_dir, episode_ids):
     all_qpos_data = []
@@ -280,57 +351,42 @@ def detach_dict(d):
 def set_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
+    
+def load_chunked_data(
+    dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, chunk_size, action_horizon
+):
+    print(f"\nData from: {dataset_dir}\n")
+    # obtain train test split
+    train_ratio = 0.8
+    shuffled_indices = np.random.permutation(num_episodes)
+    train_indices = shuffled_indices[: int(train_ratio * num_episodes)]
+    val_indices = shuffled_indices[int(train_ratio * num_episodes) :]
 
-class ChunkedSequencesDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, chunk_size):
-        super(ChunkedSequencesDataset, self).__init__()
+    # obtain normalization stats for qpos and action
+    norm_stats = get_norm_stats(dataset_dir, train_indices)
 
-        self.episode_ids = episode_ids
-        self.dataset_dir = dataset_dir
-        self.camera_names = camera_names
-        self.norm_stats = norm_stats
-        self.is_sim = None
-        self.chunk_size = chunk_size
+    # construct dataset and dataloader
+    assert (num_episodes > 1), "num_episodes must be greater than 1 to perform train/val split."
+    
+    train_dataset = ChunkedSequencesDataset(train_indices, dataset_dir, camera_names, norm_stats, chunk_size, action_horizon)
+    val_dataset = ChunkedSequencesDataset(val_indices, dataset_dir, camera_names, norm_stats, chunk_size, action_horizon)
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size_train,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=4,
+        prefetch_factor=1,
+        persistent_workers=True,
+    )
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size_val,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=4,
+        prefetch_factor=1,
+        persistent_workers=True,
+    )
 
-        # Get filepaths for all episodes
-        human_episodes = sorted(
-            glob.glob(os.path.join(dataset_dir, "sim_insertion_human", "*.hdf5"))
-        )
-        scripted_episodes = sorted(
-            glob.glob(os.path.join(dataset_dir, "sim_insertion_scripted", "*.hdf5"))
-        )
-        all_episode_paths = human_episodes + scripted_episodes
-        self.episode_paths = [all_episode_paths[i] for i in episode_ids]
-        self.episode_lengths = []
-        
-        # Calculate length of all chunks across episodes
-        for path in self.episode_paths:
-            with h5py.file(path, "r") as root:
-                episode_len = root["/action"].shape[0]
-                self.episode_lengths.append(episode_len)
-                num_full_chunks = episode_len // self.chunk_size
-                self.num_chunks += num_full_chunks
-
-        # Create random index mapping from chunk index to (episode index, start index)
-        self.index_mapping = []
-        for ep_idx, ep_len in enumerate(self.episode_lengths):
-            num_full_chunks = ep_len // self.chunk_size
-            for chunk_idx in range(num_full_chunks):
-                start_idx = chunk_idx * self.chunk_size
-                self.index_mapping.append((ep_idx, start_idx))
-
-    def __len__(self):
-        return self.num_chunks
-
-    def __getitem__(self, index):
-        ep_idx, start_idx = self.index_mapping[index]
-        episode_path = self.episode_paths[ep_idx]
-        with h5py.File(episode_path, "r") as root:
-            is_sim = root.attrs["sim"]
-
-            qpos = root["/observations/qpos"][start_idx : start_idx + self.chunk_size]
-            qvel = root["/observations/qvel"][start_idx : start_idx + self.chunk_size]
-            images = root["/observations/images/top"][start_idx : start_idx + self.chunk_size]
-            action = root["/action"][start_idx : start_idx + self.chunk_size]
-
-        # construct observations
+    return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim        

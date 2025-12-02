@@ -42,7 +42,7 @@ from diffusion_layers import (
 )
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
-from diffusion_dataloaders import load_data
+from diffusion_dataloaders import load_data, load_chunked_data
 from transformers import CLIPModel, CLIPProcessor
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from utils import dict_apply
@@ -95,7 +95,7 @@ class OpenVisionEncoder(VisionEncoder):
             model_name=f"hf-hub:{hf_repo}"
         )
 
-    def preprocess(self, image: Image.Image):
+    def preprocess(self, image):
         # image = image.convert("RGB")
         tensor_conv = Compose(
             [
@@ -156,8 +156,6 @@ class DiffusionModel(torch.nn.Module):
         self.noise_predictor = ConditionalUnet1D(
             action_dim=action_dim, global_cond_dim=obs_dim * obs_horizon
         )
-
-        self.to(device)
 
     def forward(self, image, pos, noisy_actions, timesteps):
 
@@ -278,7 +276,7 @@ class TrainDiffusIn:
         )
 
         # L2 loss
-        self.loss_fn = torch.nn.MSELoss()
+        self.loss_fn = torch.nn.MSELoss(reduction="none")
 
         self.ema_nets = self.model
 
@@ -291,16 +289,19 @@ class TrainDiffusIn:
 
         # generate global conditioning vector
         # reshape B, T, ... to B*T
-        this_nimage = dict_apply(nimage, 
-            lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
-        this_nagent_pos = dict_apply(nagent_pos, 
-            lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
+        this_nimage = nimage[:, :self.obs_horizon,...].reshape(-1, *nimage.shape[2:])
+        this_nagent_pos = nagent_pos[:, :self.obs_horizon,...].reshape(-1, *nagent_pos.shape[2:])
+        this_naction = naction[:, :self.action_horizon,...]
+        # this_nimage = dict_apply(nimage, 
+        #     lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
+        # this_nagent_pos = dict_apply(nagent_pos, 
+        #     lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
 
         # generate conditioning mask
-        condition_mask = self.mask_generator(naction.shape)
+        condition_mask = self.mask_generator(this_naction.shape).to(self.device)
 
         # sample noise to add to actions
-        noise = torch.randn(naction.shape, device=self.device)
+        noise = torch.randn(this_naction.shape, device=self.device)
         # sample a diffusion iteration for each data point
         timesteps = torch.randint(
             low=0,
@@ -312,22 +313,30 @@ class TrainDiffusIn:
         # add noise to the clean images according to the noise magnitude at each diffusion iteration
         # (this is the forward diffusion process)
         noisy_actions = self.noise_scheduler.add_noise(
-            naction, noise, timesteps
+            this_naction, noise, timesteps
         )
 
         # compute loss mask
         loss_mask = ~condition_mask
 
         # apply conditioning mask
-        noisy_actions[condition_mask] = naction[condition_mask]
+        noisy_actions[condition_mask] = this_naction[condition_mask]
 
         # predict the noise
+        # Vision encoder input needs to be B, obs_horizon, 3, 384, 384
+        # reshape this_nimage and this_nagent_pos accordingly
+        this_nimage = this_nimage.reshape(
+            B, self.obs_horizon, *this_nimage.shape[1:]
+        )
+        this_nagent_pos = this_nagent_pos.reshape(
+            B, self.obs_horizon, *this_nagent_pos.shape[1:]
+        )
         noise_pred = self.model(
             this_nimage, this_nagent_pos, noisy_actions, timesteps
         )
 
         # calculate loss
-        loss = self.loss_fn(noise_pred, noise, reduction='none')
+        loss = self.loss_fn(noise_pred, noise)
         loss = loss * loss_mask.type(loss.dtype)
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss.mean()
@@ -338,6 +347,7 @@ class TrainDiffusIn:
         """Training Loop for Diffusion Model"""
         gc.collect()
         torch.cuda.empty_cache()
+
 
         print(f"Training for {self.num_epochs} epochs with batch size {self.train_dataloader.batch_size}")
         least_val_loss = float("inf")
@@ -441,8 +451,8 @@ if __name__ == "__main__":
     # Model arguments
     parser.add_argument("--state-dim", type=int, default=14,
                        help="State dimension (default: 14)")
-    parser.add_argument("--obs-horizon", type=int, default=8,
-                       help="Observation horizon (default: 8)")
+    parser.add_argument("--obs-horizon", type=int, default=2,
+                       help="Observation horizon (default: 2)")
     parser.add_argument("--action-dim", type=int, default=14,
                        help="Action dimension (default: 14)")
     parser.add_argument("--action-horizon", type=int, default=8,
@@ -534,11 +544,20 @@ if __name__ == "__main__":
         vision_encoder=vision_encoder,
         device=device,
     )
+
+    model.to(device=device)
+    print("Initialized Diffusion Model:")
+    print(model)
     
     # Dataset and Dataloader
     # NOTE: Cannot pass num_episodes = 1 because train/val split fails
-    train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_data(
-        dataset_path, args.num_episodes, ["top"], args.batch_size, 1
+    # train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_data(
+    #     dataset_path, args.num_episodes, ["top"], args.batch_size, 1
+    # )
+
+    # Load chunked sequence dataset
+    train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_chunked_data(
+        dataset_path, args.num_episodes, ["top"], args.batch_size, 1, args.obs_horizon, args.action_horizon
     )
     
     # Initialize WandB if tracking is enabled
