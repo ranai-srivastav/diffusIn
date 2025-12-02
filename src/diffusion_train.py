@@ -43,6 +43,7 @@ from diffusion_dataloaders import load_data
 from transformers import CLIPModel, CLIPProcessor
 
 import wandb
+import gc
 
 def init_wandb(entity="mrsd-smores", project="diffusIn-training", config_dict=None):
     """Initialize WandB with configuration"""
@@ -194,6 +195,9 @@ class TrainDiffusIn:
         device,
         diffusion_timesteps,
         num_epochs,
+        vision_lr,
+        noise_predictor_lr,
+        weight_decay,
         track_wandb=True,
         ema_power=0.75,
         files_output_path=None,
@@ -213,6 +217,9 @@ class TrainDiffusIn:
         self.track_wandb = track_wandb
         self.files_output_path = files_output_path
         self.debug = debug
+        self.vision_lr = vision_lr
+        self.noise_predictor_lr = noise_predictor_lr
+        self.weight_decay = weight_decay
 
         ## Exponential Moving Average improves Training Stability
         self.ema = EMAModel(parameters=model.parameters(), power=ema_power)
@@ -223,17 +230,17 @@ class TrainDiffusIn:
             params=[
                 {
                     "params": model.vision_encoder.parameters(),
-                    "lr": 4e-4,
+                    "lr": self.vision_lr,
                     "name": "vision_encoder",
                 },  # ViT was trained with 4e-3 LR
                 {
                     "params": model.noise_predictor.parameters(),
-                    "lr": 1e-4,
+                    "lr": self.noise_predictor_lr,
                     "name": "noise_predictor",
                 },
             ],
-            lr=1e-4,
-            weight_decay=1e-6,
+            lr=self.noise_predictor_lr,
+            weight_decay=self.weight_decay,
         )
 
         # Cosine LR schedule with linear warmup
@@ -262,6 +269,9 @@ class TrainDiffusIn:
 
     def train(self):
         """Training Loop for Diffusion Model"""
+        gc.collect()
+        torch.cuda.empty_cache()
+
         print(f"Training for {self.num_epochs} epochs with batch size {self.train_dataloader.batch_size}")
         least_val_loss = float("inf")
         with tqdm(range(self.num_epochs), desc="Epoch") as t_global:
@@ -351,13 +361,15 @@ class TrainDiffusIn:
 
                                 # calculate loss
                                 loss_val = self.loss_fn(noise_pred, noise)
-
-                                batch_loss += loss_val
+                                
+                                # Calculate gradients for every batch instead of every sequence
+                                # Average gradients to avoid exploding gradients
+                                (loss_val / stacked_indices.shape[1]).backward()
+                                # Add mean of every sequence loss to get batch loss
+                                batch_loss += (loss_val.detach() / stacked_indices.shape[1])
                         
                         # optimize
                         # this is different from standard pytorch behavior #NOTE: Understand why they are doing so
-                        batch_loss = batch_loss / stacked_indices.shape[1]
-                        batch_loss.backward()
                         self.optimizer.step()
                         self.optimizer.zero_grad()
 
@@ -438,6 +450,12 @@ if __name__ == "__main__":
                        help="Number of diffusion timesteps (default: 100)")
     parser.add_argument("--ema-power", type=float, default=0.75,
                        help="EMA power (default: 0.75)")
+    parser.add_argument("--vision-lr", type=float, default=4e-4,
+                       help="Learning rate for vision encoder (default: 4e-4)")
+    parser.add_argument("--noise-predictor-lr", type=float, default=1e-4,
+                       help="Learning rate for noise predictor (default: 1e-4)")
+    parser.add_argument("--weight-decay", type=float, default=1e-6,
+                       help="Weight decay for optimizer (default: 1e-6)")
     
     # Model arguments
     parser.add_argument("--state-dim", type=int, default=14,
@@ -470,7 +488,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", default=False,
                        help="Enable debug mode (default: False)")
     parser.add_argument("--device", type=str, default="auto",
-                       choices=["auto", "cuda", "cpu"],
+                       choices=["auto", "cuda", "cuda:0", "cuda:1", "cpu"],
                        help="Device to use (default: auto)")
     
     args = parser.parse_args()
@@ -507,6 +525,9 @@ if __name__ == "__main__":
             "batch_size": args.batch_size,
             "num_train_timesteps": args.num_train_timesteps,
             "ema_power": args.ema_power,
+            "vision_lr": args.vision_lr,
+            "noise_predictor_lr": args.noise_predictor_lr,
+            "weight_decay": args.weight_decay,
         },
         "model": {
             "vision_feature_dim": args.vision_feature_dim,
@@ -554,6 +575,10 @@ if __name__ == "__main__":
             "action_horizon": args.action_horizon,
             "execution_horizon": args.execution_horizon,
             "vision_encoder": args.vision_encoder,
+            "vision_lr": args.vision_lr,
+            "noise_predictor_lr": args.noise_predictor_lr,
+            "weight_decay": args.weight_decay,
+            "device": str(device),
         }
         init_wandb(entity=args.wandb_entity, project=args.wandb_project, config_dict=wandb_config)
     
@@ -574,5 +599,8 @@ if __name__ == "__main__":
         ema_power=args.ema_power,
         files_output_path=files_output_path,
         debug=DEBUG,
+        vision_lr=args.vision_lr,
+        noise_predictor_lr=args.noise_predictor_lr,
+        weight_decay=args.weight_decay,
     )
     trainer.train()
