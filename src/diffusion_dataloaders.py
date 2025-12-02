@@ -280,3 +280,57 @@ def detach_dict(d):
 def set_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+class ChunkedSequencesDataset(torch.utils.data.Dataset):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, chunk_size):
+        super(ChunkedSequencesDataset, self).__init__()
+
+        self.episode_ids = episode_ids
+        self.dataset_dir = dataset_dir
+        self.camera_names = camera_names
+        self.norm_stats = norm_stats
+        self.is_sim = None
+        self.chunk_size = chunk_size
+
+        # Get filepaths for all episodes
+        human_episodes = sorted(
+            glob.glob(os.path.join(dataset_dir, "sim_insertion_human", "*.hdf5"))
+        )
+        scripted_episodes = sorted(
+            glob.glob(os.path.join(dataset_dir, "sim_insertion_scripted", "*.hdf5"))
+        )
+        all_episode_paths = human_episodes + scripted_episodes
+        self.episode_paths = [all_episode_paths[i] for i in episode_ids]
+        self.episode_lengths = []
+        
+        # Calculate length of all chunks across episodes
+        for path in self.episode_paths:
+            with h5py.file(path, "r") as root:
+                episode_len = root["/action"].shape[0]
+                self.episode_lengths.append(episode_len)
+                num_full_chunks = episode_len // self.chunk_size
+                self.num_chunks += num_full_chunks
+
+        # Create random index mapping from chunk index to (episode index, start index)
+        self.index_mapping = []
+        for ep_idx, ep_len in enumerate(self.episode_lengths):
+            num_full_chunks = ep_len // self.chunk_size
+            for chunk_idx in range(num_full_chunks):
+                start_idx = chunk_idx * self.chunk_size
+                self.index_mapping.append((ep_idx, start_idx))
+
+    def __len__(self):
+        return self.num_chunks
+
+    def __getitem__(self, index):
+        ep_idx, start_idx = self.index_mapping[index]
+        episode_path = self.episode_paths[ep_idx]
+        with h5py.File(episode_path, "r") as root:
+            is_sim = root.attrs["sim"]
+
+            qpos = root["/observations/qpos"][start_idx : start_idx + self.chunk_size]
+            qvel = root["/observations/qvel"][start_idx : start_idx + self.chunk_size]
+            images = root["/observations/images/top"][start_idx : start_idx + self.chunk_size]
+            action = root["/action"][start_idx : start_idx + self.chunk_size]
+
+        # construct observations
