@@ -45,6 +45,7 @@ from diffusers.optimization import get_scheduler
 from diffusion_dataloaders import load_data
 from transformers import CLIPModel, CLIPProcessor
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
+from utils import dict_apply
 
 import wandb
 import gc
@@ -63,18 +64,6 @@ def save_config(config_dict, output_path):
     with open(config_file, 'w') as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
     print(f"Saved configuration to {config_file}")
-
-def dict_apply(
-        x: Dict[str, torch.Tensor], 
-        func: Callable[[torch.Tensor], torch.Tensor]
-        ) -> Dict[str, torch.Tensor]:
-    result = dict()
-    for key, value in x.items():
-        if isinstance(value, dict):
-            result[key] = dict_apply(value, func)
-        else:
-            result[key] = func(value)
-    return result
 
 # Action space:      [left_arm_qpos (6),             # absolute joint position
 #                         left_gripper_positions (1),    # normalized gripper position (0: close, 1: open)
