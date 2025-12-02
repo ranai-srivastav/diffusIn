@@ -201,9 +201,9 @@ class TrainDiffusIn:
     def __init__(
         self,
         model: DiffusionModel,
-        action_horizon,
+        pred_horizon,
         execution_horizon,
-        obs_history,
+        obs_horizon,
         # dataloaders
         train_dataloader,
         val_dataloader,
@@ -223,9 +223,9 @@ class TrainDiffusIn:
     ):
         # model params
         self.model=model
-        self.action_horizon=action_horizon
+        self.pred_horizon=pred_horizon
         self.execution_horizon=execution_horizon
-        self.obs_history=obs_history
+        self.obs_horizon=obs_horizon
         self.device=model.device
 
         # dataloaders
@@ -291,7 +291,7 @@ class TrainDiffusIn:
         self.mask_generator = LowdimMaskGenerator(
             action_dim=model.action_dim,
             obs_dim=0,
-            max_n_obs_steps=obs_history,
+            max_n_obs_steps=obs_horizon,
             fix_obs_steps=True,
             action_visible=False
         )
@@ -304,25 +304,19 @@ class TrainDiffusIn:
     def training_step(self, batch):
         nimage = batch["image"]
         nagent_pos = batch["q_pos"]
-        naction = batch["action"]
+        naction = batch["action"] # B x pred_horizon x action_dim
         B = naction.shape[0]
-        horizon = naction.shape[1]
 
         # generate global conditioning vector
-        # reshape B, T, ... to B*T
-        this_nimage = nimage[:, :self.obs_horizon,...].reshape(-1, *nimage.shape[2:])
-        this_nagent_pos = nagent_pos[:, :self.obs_horizon,...].reshape(-1, *nagent_pos.shape[2:])
-        this_naction = naction[:, :self.action_horizon,...]
-        # this_nimage = dict_apply(nimage, 
-        #     lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
-        # this_nagent_pos = dict_apply(nagent_pos, 
-        #     lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
+        # Vision encoder input needs to be B, obs_horizon, 3, 384, 384
+        this_nimage = nimage[:, :self.obs_horizon,...]
+        this_nagent_pos = nagent_pos[:, :self.obs_horizon,...]
 
         # generate conditioning mask
-        condition_mask = self.mask_generator(this_naction.shape).to(self.device)
+        condition_mask = self.mask_generator(naction.shape).to(self.device)
 
         # sample noise to add to actions
-        noise = torch.randn(this_naction.shape, device=self.device)
+        noise = torch.randn(naction.shape, device=self.device)
         # sample a diffusion iteration for each data point
         timesteps = torch.randint(
             low=0,
@@ -334,24 +328,16 @@ class TrainDiffusIn:
         # add noise to the clean images according to the noise magnitude at each diffusion iteration
         # (this is the forward diffusion process)
         noisy_actions = self.noise_scheduler.add_noise(
-            this_naction, noise, timesteps
+            naction, noise, timesteps
         )
 
         # compute loss mask
         loss_mask = ~condition_mask
 
         # apply conditioning mask
-        noisy_actions[condition_mask] = this_naction[condition_mask]
+        noisy_actions[condition_mask] = naction[condition_mask]
 
         # predict the noise
-        # Vision encoder input needs to be B, obs_horizon, 3, 384, 384
-        # reshape this_nimage and this_nagent_pos accordingly
-        this_nimage = this_nimage.reshape(
-            B, self.obs_horizon, *this_nimage.shape[1:]
-        )
-        this_nagent_pos = this_nagent_pos.reshape(
-            B, self.obs_horizon, *this_nagent_pos.shape[1:]
-        )
         noise_pred = self.model(
             this_nimage, this_nagent_pos, noisy_actions, timesteps
         )
@@ -470,15 +456,13 @@ if __name__ == "__main__":
     # Model arguments
     parser.add_argument("--state-dim", type=int, default=14,
                        help="State dimension (default: 14)")
-    parser.add_argument("--obs-horizon", type=int, default=2,
-                       help="Observation horizon (default: 2)")
     parser.add_argument("--action-dim", type=int, default=14,
                        help="Action dimension (default: 14)")
-    parser.add_argument("--action-horizon", type=int, default=8,
-                       help="Action horizon (default: 8)")
+    parser.add_argument("--pred-horizon", type=int, default=8,
+                       help="Prediction horizon (default: 8)")
     parser.add_argument("--execution-horizon", type=int, default=4,
                        help="Execution horizon (default: 4)")
-    parser.add_argument("--obs-history", type=int, default=2,
+    parser.add_argument("--obs-horizon", type=int, default=2,
                        help="Number of observation steps to condition on (default: 2)")
     parser.add_argument("--vision-encoder", type=str, default="OpenVision-vit-tiny",
                        choices=["OpenVision-vit-tiny", "CLIP"],
@@ -550,7 +534,7 @@ if __name__ == "__main__":
             "observation_horizon": args.obs_horizon,
             "observation_dim": args.observation_dim,
             "action_dim": args.action_dim,
-            "action_horizon": args.action_horizon,
+            "pred_horizon": args.pred_horizon,
             "execution_horizon": args.execution_horizon,
             "vision_encoder": args.vision_encoder,
         }
@@ -575,13 +559,9 @@ if __name__ == "__main__":
     
     # Dataset and Dataloader
     # NOTE: Cannot pass num_episodes = 1 because train/val split fails
-    # train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_data(
-    #     dataset_path, args.num_episodes, ["top"], args.batch_size, 1
-    # )
-
     # Load chunked sequence dataset
     train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_chunked_data(
-        dataset_path, args.num_episodes, ["top"], args.batch_size, 1, args.obs_horizon, args.action_horizon
+        dataset_path, args.num_episodes, ["top"], args.batch_size, 1, args.pred_horizon, args.obs_horizon
     )
     
     # Initialize WandB if tracking is enabled
@@ -596,7 +576,7 @@ if __name__ == "__main__":
             "observation_horizon": args.obs_horizon,
             "observation_dim": args.observation_dim,
             "action_dim": args.action_dim,
-            "action_horizon": args.action_horizon,
+            "pred_horizon": args.pred_horizon,
             "execution_horizon": args.execution_horizon,
             "vision_encoder": args.vision_encoder,
             "vision_lr": args.vision_lr,
@@ -617,19 +597,13 @@ if __name__ == "__main__":
         device=device,
     )
     
-    # Dataset and Dataloader
-    # NOTE: Cannot pass num_episodes = 1 because train/val split fails
-    train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_data(
-        dataset_path, args.num_episodes, ["top"], args.batch_size, 1
-    )
-    
     # Initialize trainer
     trainer = TrainDiffusIn(
         # model params
         model=model,
-        action_horizon=args.action_horizon,
+        pred_horizon=args.pred_horizon,
         execution_horizon=args.execution_horizon,
-        obs_history=args.obs_history,
+        obs_horizon=args.obs_horizon,
         # dataloaders
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
@@ -638,13 +612,13 @@ if __name__ == "__main__":
         diffusion_timesteps=args.num_train_timesteps,
         num_epochs=args.num_epochs,
         ema_power=args.ema_power,
+        vision_lr=args.vision_lr,
+        noise_predictor_lr=args.noise_predictor_lr,
+        weight_decay=args.weight_decay,
         # logging params
         track_wandb=not args.no_track,
         save_every=args.save_every,
         files_output_path=files_output_path,
         debug=DEBUG,
-        vision_lr=args.vision_lr,
-        noise_predictor_lr=args.noise_predictor_lr,
-        weight_decay=args.weight_decay,
     )
     trainer.train()

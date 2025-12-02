@@ -86,7 +86,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         return values
     
 class ChunkedSequencesDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, chunk_size, action_horizon):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, pred_horizon, obs_horizon):
         super(ChunkedSequencesDataset, self).__init__()
 
         self.episode_ids = episode_ids
@@ -94,9 +94,9 @@ class ChunkedSequencesDataset(torch.utils.data.Dataset):
         self.camera_names = camera_names
         self.norm_stats = norm_stats
         self.is_sim = None
-        self.chunk_size = chunk_size
+        self.chunk_size = pred_horizon
+        self.obs_horizon = obs_horizon
         self.num_chunks = 0
-        self.action_horizon = action_horizon
 
         # Get filepaths for all episodes
         human_episodes = sorted(
@@ -114,14 +114,13 @@ class ChunkedSequencesDataset(torch.utils.data.Dataset):
             with h5py.File(path, "r") as root:
                 episode_len = root["/action"].shape[0]
                 self.episode_lengths.append(episode_len)
-                num_full_chunks = (episode_len - self.action_horizon) // self.chunk_size
-                self.num_chunks += num_full_chunks
 
         # Create random index mapping from chunk index to (episode index, start index)
         self.index_mapping = []
         for ep_idx, ep_len in enumerate(self.episode_lengths):
-            num_full_chunks = (ep_len - self.action_horizon) // self.chunk_size
-            for chunk_idx in range(1, num_full_chunks):
+            num_full_chunks = ep_len // self.chunk_size
+            self.num_chunks += num_full_chunks
+            for chunk_idx in range(num_full_chunks):
                 start_idx = chunk_idx * self.chunk_size
                 self.index_mapping.append((ep_idx, start_idx))
 
@@ -137,10 +136,10 @@ class ChunkedSequencesDataset(torch.utils.data.Dataset):
         with h5py.File(episode_path, "r") as root:
             is_sim = root.attrs["sim"]
 
-            data_dict["q_pos"] = root["/observations/qpos"][start_idx - self.chunk_size : start_idx + self.action_horizon]
-            data_dict["q_vel"] = root["/observations/qvel"][start_idx - self.chunk_size : start_idx + self.action_horizon]
-            data_dict["image"] = root["/observations/images/top"][start_idx - self.chunk_size : start_idx + self.action_horizon]
-            data_dict["action"] = root["/action"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+            data_dict["q_pos"] = root["/observations/qpos"][start_idx : start_idx + self.obs_horizon]
+            data_dict["q_vel"] = root["/observations/qvel"][start_idx : start_idx + self.obs_horizon]
+            data_dict["image"] = root["/observations/images/top"][start_idx : start_idx + self.obs_horizon]
+            data_dict["action"] = root["/action"][start_idx : start_idx + self.chunk_size]
 
         # construct observations
         data_dict = dict_apply(data_dict, lambda x: torch.from_numpy(x).float())
@@ -353,7 +352,7 @@ def set_seed(seed):
     np.random.seed(seed)
     
 def load_chunked_data(
-    dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, chunk_size, action_horizon
+    dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, pred_horizon, obs_horizon
 ):
     print(f"\nData from: {dataset_dir}\n")
     # obtain train test split
@@ -368,8 +367,8 @@ def load_chunked_data(
     # construct dataset and dataloader
     assert (num_episodes > 1), "num_episodes must be greater than 1 to perform train/val split."
     
-    train_dataset = ChunkedSequencesDataset(train_indices, dataset_dir, camera_names, norm_stats, chunk_size, action_horizon)
-    val_dataset = ChunkedSequencesDataset(val_indices, dataset_dir, camera_names, norm_stats, chunk_size, action_horizon)
+    train_dataset = ChunkedSequencesDataset(train_indices, dataset_dir, camera_names, norm_stats, pred_horizon, obs_horizon)
+    val_dataset = ChunkedSequencesDataset(val_indices, dataset_dir, camera_names, norm_stats, pred_horizon, obs_horizon)
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=batch_size_train,
