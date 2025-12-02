@@ -141,21 +141,24 @@ class InferDiffusIn:
             imgs.append(img)
         return imgs
 
-    def _stack_vertical(self, imgs):
-        """Stack images vertically"""
+    def _stack_images(self, imgs, horizontal=True):
+        """Stack images horizontally or vertically"""
         h_min = min(im.shape[0] for im in imgs)
         w_min = min(im.shape[1] for im in imgs)
         imgs_cropped = [im[:h_min, :w_min, :] for im in imgs]
-        stacked = np.concatenate(imgs_cropped, axis=0)
+        if horizontal:
+            stacked = np.concatenate(imgs_cropped, axis=1)
+        else:
+            stacked = np.concatenate(imgs_cropped, axis=0)
         return stacked
 
     def _get_frame_from_env(self, ts):
         """Get frame from environment observations"""
         imgs = self._capture_views(ts)
-        stacked = self._stack_vertical(imgs)
+        stacked = self._stack_images(imgs)
         return stacked
 
-    def eval(self, env, max_steps=500, render=False):  # default values taken from TRI example, should change
+    def eval(self, env, max_steps=500, render_offscreen=False, render_onscreen=False):  # default values taken from TRI example, should change
         """Evaluation Loop for Diffusion Model"""
 #         in training:
         # |o|o|o|o|o|o|o|o|                 pred_horizon: 8
@@ -185,8 +188,20 @@ class InferDiffusIn:
         obs_deque = collections.deque([obs] * self.obs_horizon, maxlen=self.obs_horizon)
 
         frames = []
-        if render:
+        if render_offscreen:
             frames.append(self._get_frame_from_env(ts))
+
+        if render_onscreen:
+            # Create a borderless, axis-free, full-figure render sized to the frame
+            frame = self._get_frame_from_env(ts)
+            h, w = frame.shape[:2]
+            dpi = 100
+            fig = plt.figure(figsize=(w / dpi, h / dpi), dpi=dpi)
+            ax = fig.add_axes([0, 0, 1, 1])   # fill entire figure
+            ax.set_axis_off()
+            plt_img = ax.imshow(frame, aspect="equal")
+            plt.ion()
+            print("Creating onscreen render")
 
         rewards = []
         done = False
@@ -194,6 +209,7 @@ class InferDiffusIn:
 
         with tqdm(total=max_steps, desc="Eval SimInsertion") as pbar:
             while not done:
+
                 B = 1
                 # stack the last obs_horizon number of observations
                 images = np.stack([x["images"]["top"] for x in obs_deque])
@@ -286,8 +302,14 @@ class InferDiffusIn:
                     # and reward/vis
                     rewards.append(reward)
 
-                    if render:
+                    if render_offscreen:
                         frames.append(self._get_frame_from_env(ts))
+
+                    if render_onscreen:
+                        # Update onscreen render with current frame
+                        frame = self._get_frame_from_env(ts)
+                        plt_img.set_data(frame)
+                        plt.pause(0.02)
 
                     # update progress bar
                     step_idx += 1
@@ -303,7 +325,7 @@ class InferDiffusIn:
         # print out the maximum target coverage
         print("Score: ", max(rewards))
 
-        if render:
+        if render_offscreen:
             # save vis as gif
             save_path = f"{self.file_path}/eval_vis_{self.checkpoint_name}.gif"
             # NOTE: The original hz is 50, but we set it to a custom value here.
@@ -367,4 +389,4 @@ if __name__ == "__main__":
                         help="Maximum number of steps to run in the environment")
     args = parser.parse_args()
     evaluator = InferDiffusIn(file_path=args.file_dir_path, checkpoint_name=args.checkpoint_name, device=args.device)
-    evaluator.eval(env, max_steps=args.max_steps, render=True)
+    evaluator.eval(env, max_steps=args.max_steps, render_offscreen=False, render_onscreen=True)
