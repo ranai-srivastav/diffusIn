@@ -34,33 +34,7 @@ def parse_config(config_path):
         config_path: Path to config.yaml file (can be a string or Path object)
         
     Returns:
-        dict: Configuration dictionary with the following structure:
-            {
-                "training": {
-                    "num_epochs": int,
-                    "num_episodes": int,
-                    "batch_size": int,
-                    "num_train_timesteps": int,
-                    "ema_power": float,
-                },
-                "model": {
-                    "vision_feature_dim": int,
-                    "state_dim": int,
-                    "observation_horizon": int,
-                    "observation_dim": int,
-                    "action_dim": int,
-                    "action_horizon": int,
-                    "execution_horizon": int,
-                    "vision_encoder": str,
-                },
-                "wandb": {
-                    "entity": str,
-                    "project": str,
-                    "track": bool,
-                },
-                "debug": bool,
-                "device": str,
-            }
+        dict: Configuration dictionary
             
     Raises:
         FileNotFoundError: If config file doesn't exist
@@ -92,17 +66,17 @@ class InferDiffusIn:
     def __init__(self, file_path, checkpoint_name=None, debug=False):
 
         config = parse_config(Path(file_path) / "config.yaml")
-        self.num_epochs = config["training"].get("num_epochs", 100)
         self.diffusion_timesteps = config["training"].get("num_train_timesteps", 100)
         self.device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
-        self.action_horizon = config["model"].get("action_horizon", 8)
+        self.pred_horizon = config["model"].get("pred_horizon", 8)
         self.execution_horizon = config["model"].get("execution_horizon", 4)
+        self.obs_horizon = config["model"].get("observation_horizon", 2)
         self.debug = debug
         self.file_path = file_path
         self.checkpoint_name = checkpoint_name
 
         self.noise_scheduler = DDPMScheduler(
-            num_train_timesteps=config["training"].get("num_train_timesteps", 100),
+            num_train_timesteps=self.diffusion_timesteps,
             # the choice of beta schedule has big impact on performance
             # we found squared cosine works the best
             beta_schedule="squaredcos_cap_v2",
@@ -121,7 +95,7 @@ class InferDiffusIn:
             state_dim=config["model"].get("state_dim", 14),
             obs_dim=config["model"].get("observation_dim", 206),
             action_dim=config["model"].get("action_dim", 14),
-            obs_horizon=config["model"].get("observation_horizon", 8),
+            obs_horizon=self.obs_horizon,
             vision_encoder=self.vision_encoder,
             device=self.device,
         )
@@ -137,11 +111,19 @@ class InferDiffusIn:
 
     def eval(self, env, max_steps=500, render=False):  # default values taken from TRI example, should change
         """Evaluation Loop for Diffusion Model"""
-        # |o|o|o|o|o|o|o|o|                 observations: 8
-        # |p|p|p|p|p|p|p|p|                 action predictions: 8
-        # | | | | | | | | |a|a|a|a|a|       actions executed: 4
+#         in training:
+        # |o|o|o|o|o|o|o|o|                 pred_horizon: 8
+        # |h|h| | | | | | |                 obs_horizon: 2
+        # given conditioning of length obs_horizon, we predict the action seq for the whole pred_horizon 
+        # (with conditioning mask, not pictured) 
+
+        # in eval:
+        # |o|o|o|o|o|o|o|o|                 pred_horizon: 8
+        # |h|h| | | | | | |                 obs_horizon: 2
+        # | |a|a|a|a| | | |              execution_horizon: 4
+        # given conditioning of length obs_horizon, we predict action seq for the whole pred_horizon, 
+        # but only execute execution_horizon actions starting from the current obs (last idx in obs_horizon)
         print(f"Device: {self.device}")
-        pred_horizon = self.action_horizon
         self.ema_nets.eval()
 
         # Reset environment with random peg and socket pose
@@ -205,7 +187,7 @@ class InferDiffusIn:
                 with torch.no_grad():
                     # initialize action from Guassian noise
                     noisy_action = torch.randn(
-                        (B, pred_horizon, self.action_dim), device=self.device
+                        (B, self.pred_horizon, self.ema_nets.action_dim), device=self.device
                     )
                     naction = noisy_action
 
@@ -242,9 +224,9 @@ class InferDiffusIn:
                     self.visualize_actions(action_pred, save_path="data/local_debug/denoised_action.png")
                 
                 # only take execution_horizon number of actions
-                action = action_pred[
-                    : self.execution_horizon, :
-                ]  # (execution_horizon, action_dim)
+                start = self.obs_horizon - 1
+                end = start + self.execution_horizon
+                action = action_pred[start:end, :]  # (execution_horizon, action_dim)
 
                 # execute action_horizon number of steps
                 # without replanning
