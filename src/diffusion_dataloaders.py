@@ -195,7 +195,7 @@ def load_data(
         batch_size=batch_size_train,
         shuffle=True,
         pin_memory=True,
-        num_workers=4,
+        num_workers=0,
         # TODO: Tune prefetch factor
         prefetch_factor=1,
         persistent_workers=True,
