@@ -158,6 +158,8 @@ class DiffusionModel(torch.nn.Module):
             action_dim=action_dim, global_cond_dim=obs_dim * obs_horizon
         )
 
+        self.to(device=device)
+
     def forward(self, image, pos, noisy_actions, timesteps):
 
         # Generating vision embedding

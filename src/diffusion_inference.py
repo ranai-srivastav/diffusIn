@@ -82,11 +82,11 @@ def parse_config(config_path):
     return validated_config
 
 class InferDiffusIn:
-    def __init__(self, file_path, checkpoint_name=None, debug=False):
+    def __init__(self, file_path, checkpoint_name=None, device="cuda" if torch.cuda.is_available() else "cpu", debug=False):
 
         config = parse_config(Path(file_path) / "config.yaml")
         self.diffusion_timesteps = config["training"].get("num_train_timesteps", 100)
-        self.device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
         self.pred_horizon = config["model"].get("pred_horizon", 8)
         self.execution_horizon = config["model"].get("execution_horizon", 4)
         self.obs_horizon = config["model"].get("observation_horizon", 2)
@@ -305,7 +305,7 @@ class InferDiffusIn:
 
         if render:
             # save vis as gif
-            save_path = f"data/eval_vis_{self.checkpoint_name}.gif"
+            save_path = f"{self.file_path}/eval_vis_{self.checkpoint_name}.gif"
             # NOTE: The original hz is 50, but we set it to a custom value here.
             imageio.mimsave(save_path, frames, fps=FPS, loop=0)  # loop=0 means infinite loop
             print(f"Saved GIF to {save_path}")
@@ -361,6 +361,8 @@ if __name__ == "__main__":
     parser.add_argument("--file_dir_path", type=str, required=True,
                         help="Path to the config.yaml file")
     parser.add_argument("--checkpoint_name", type=str, default=None,)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+                        help="Device to run the model on (default: cuda if available else cpu)")
     args = parser.parse_args()
-    evaluator = InferDiffusIn(file_path=args.file_dir_path, checkpoint_name=args.checkpoint_name)
+    evaluator = InferDiffusIn(file_path=args.file_dir_path, checkpoint_name=args.checkpoint_name, device=args.device)
     evaluator.eval(env, max_steps=20, render=True)
