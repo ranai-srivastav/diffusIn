@@ -151,12 +151,13 @@ class DiffusionModel(torch.nn.Module):
         obs_dim,
         action_dim,
         obs_horizon,
-        vision_encoder,
+        vision_encoder: VisionEncoder,
         device,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.obs_dim = obs_dim
+        self.action_dim = action_dim
         self.obs_horizon = obs_horizon
         self.device = device
 
@@ -200,37 +201,45 @@ class TrainDiffusIn:
     def __init__(
         self,
         model: DiffusionModel,
+        action_horizon,
+        execution_horizon,
+        obs_history,
+        # dataloaders
         train_dataloader,
         val_dataloader,
         stats,
-        action_dim,
-        obs_horizon,
-        action_horizon,
-        execution_horizon,
-        device,
+        # training params
         diffusion_timesteps,
         num_epochs,
+        ema_power,
+        # logging params
+        track_wandb,
         save_every,
-        track_wandb=True,
-        ema_power=0.75,
-        files_output_path=None,
+        files_output_path,
         debug=False,
     ):
-        self.model = model
-        self.train_dataloader = train_dataloader
-        self.val_dataloader = val_dataloader
-        self.stats = stats
-        self.action_dim = action_dim
-        self.obs_horizon = obs_horizon
-        self.action_horizon = action_horizon
-        self.execution_horizon = execution_horizon
-        self.device = device
-        self.num_epochs = num_epochs
-        self.save_every = save_every
-        self.diffusion_timesteps = diffusion_timesteps
-        self.track_wandb = track_wandb
-        self.files_output_path = files_output_path
-        self.debug = debug
+        # model params
+        self.model=model
+        self.action_horizon=action_horizon
+        self.execution_horizon=execution_horizon
+        self.obs_history=obs_history
+        self.device=model.device
+
+        # dataloaders
+        self.train_dataloader=train_dataloader
+        self.val_dataloader=val_dataloader
+        self.stats=stats
+
+        # training params
+        self.diffusion_timesteps=diffusion_timesteps
+        self.num_epochs=num_epochs
+        self.ema_power=ema_power
+
+        # logging params
+        self.track_wandb=track_wandb
+        self.save_every=save_every
+        self.files_output_path=files_output_path
+        self.debug=debug
 
         ## Exponential Moving Average improves Training Stability
         self.ema = EMAModel(parameters=model.parameters(), power=ema_power)
@@ -274,9 +283,9 @@ class TrainDiffusIn:
         )
 
         self.mask_generator = LowdimMaskGenerator(
-            action_dim=action_dim,
+            action_dim=model.action_dim,
             obs_dim=0,
-            max_n_obs_steps=2, # TODO make configurable
+            max_n_obs_steps=obs_history,
             fix_obs_steps=True,
             action_visible=False
         )
@@ -296,9 +305,9 @@ class TrainDiffusIn:
         # generate global conditioning vector
         # reshape B, T, ... to B*T
         this_nimage = dict_apply(nimage, 
-            lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
+            lambda x: x[:,:self.obs_history,...].reshape(-1,*x.shape[2:]))
         this_nagent_pos = dict_apply(nagent_pos, 
-            lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
+            lambda x: x[:,:self.obs_history,...].reshape(-1,*x.shape[2:]))
 
         # generate conditioning mask
         condition_mask = self.mask_generator(naction.shape)
@@ -341,13 +350,11 @@ class TrainDiffusIn:
     def train(self):
         """Training Loop for Diffusion Model"""
         print(f"Training for {self.num_epochs} epochs with batch size {self.train_dataloader.batch_size}")
-        least_val_loss = float("inf")
         with tqdm(range(self.num_epochs), desc="Epoch") as t_global:
             # epoch loop
             for epoch_idx in t_global:
                 epoch_loss = list()
                 # batch loop
-
                 with tqdm(self.train_dataloader, desc="Batch", leave=False) as t_epoch:
                     for nbatch in t_epoch:
                         # move batch to device
@@ -423,11 +430,11 @@ if __name__ == "__main__":
     
     # Training arguments
     parser.add_argument("--num-epochs", type=int, default=1000,
-                       help="Number of training epochs (default: 100)")
+                       help="Number of training epochs (default: 1000)")
     parser.add_argument("--num-episodes", type=int, default=100,
                        help="Number of episodes to load from dataset (default: 100)")
-    parser.add_argument("--batch-size", type=int, default=4,
-                       help="Batch size for training (default: 4)")
+    parser.add_argument("--batch-size", type=int, default=64,
+                       help="Batch size for training (default: 64)")
     parser.add_argument("--num-train-timesteps", type=int, default=100,
                        help="Number of diffusion timesteps (default: 100)")
     parser.add_argument("--ema-power", type=float, default=0.75,
@@ -444,6 +451,8 @@ if __name__ == "__main__":
                        help="Action horizon (default: 8)")
     parser.add_argument("--execution-horizon", type=int, default=4,
                        help="Execution horizon (default: 4)")
+    parser.add_argument("--obs-history", type=int, default=2,
+                       help="Number of observation steps to condition on (default: 2)")
     parser.add_argument("--vision-encoder", type=str, default="OpenVision-vit-tiny",
                        choices=["OpenVision-vit-tiny", "CLIP"],
                        help="Vision encoder type (default: OpenVision-vit-tiny)")
@@ -461,6 +470,8 @@ if __name__ == "__main__":
                        help="WandB project name (default: diffusIn-training)")
     
     # Other arguments
+    parser.add_argument("--save-every", type=int, default=50,
+                       help="Save model every N epochs (default: 50)")
     parser.add_argument("--debug", action="store_true", default=False,
                        help="Enable debug mode (default: False)")
     parser.add_argument("--device", type=str, default="auto",
@@ -469,6 +480,7 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
+    # Set up dirs
     dataset_path = Path(args.dataset_path).absolute()
     if not dataset_path.exists():
         print(f"Warning: Dataset path {dataset_path} does not exist")
@@ -514,25 +526,7 @@ if __name__ == "__main__":
         }
     }
     save_config(config_dict, files_output_path)
-    
-    print(f"Using device: {device}")
-    
-    # Initialize model
-    model = DiffusionModel(
-        state_dim=args.state_dim,
-        obs_dim=args.observation_dim,
-        action_dim=args.action_dim,
-        obs_horizon=args.obs_horizon,
-        vision_encoder=vision_encoder,
-        device=device,
-    )
-    
-    # Dataset and Dataloader
-    # NOTE: Cannot pass num_episodes = 1 because train/val split fails
-    train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_data(
-        dataset_path, args.num_episodes, ["top"], args.batch_size, 1
-    )
-    
+
     # Initialize WandB if tracking is enabled
     if not args.no_track:
         wandb_config = {
@@ -551,22 +545,41 @@ if __name__ == "__main__":
         }
         init_wandb(entity=args.wandb_entity, project=args.wandb_project, config_dict=wandb_config)
     
+    print(f"Using device: {device}")
+    # Initialize model
+    model = DiffusionModel(
+        state_dim=args.state_dim,
+        obs_dim=args.observation_dim,
+        action_dim=args.action_dim,
+        obs_horizon=args.obs_horizon,
+        vision_encoder=vision_encoder,
+        device=device,
+    )
+    
+    # Dataset and Dataloader
+    # NOTE: Cannot pass num_episodes = 1 because train/val split fails
+    train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_data(
+        dataset_path, args.num_episodes, ["top"], args.batch_size, 1
+    )
+    
     # Initialize trainer
     trainer = TrainDiffusIn(
+        # model params
         model=model,
+        action_horizon=args.action_horizon,
+        execution_horizon=args.execution_horizon,
+        obs_history=args.obs_history,
+        # dataloaders
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
         stats=norm_dataset_stats,
-        action_dim=args.action_dim,
-        obs_horizon=args.obs_horizon,
-        action_horizon=args.action_horizon,
-        execution_horizon=args.execution_horizon,
-        device=device,
+        # training params
         diffusion_timesteps=args.num_train_timesteps,
         num_epochs=args.num_epochs,
-        save_every=10, # TODO make configurable
-        track_wandb=not args.no_track,
         ema_power=args.ema_power,
+        # logging params
+        track_wandb=not args.no_track,
+        save_every=args.save_every,
         files_output_path=files_output_path,
         debug=DEBUG,
     )
