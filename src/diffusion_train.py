@@ -1,4 +1,5 @@
 import os, sys
+from typing import Dict, Callable, List
 import argparse
 import yaml
 import time
@@ -10,11 +11,13 @@ sys.path.extend(
         str(Path("include").resolve()),
         str(Path("include/act").resolve()),
         str(Path("include/OpenVision").resolve()),
+        str(Path("include/diffusion_policy").resolve()),
     ]
 )
 import numpy as np
 from tqdm import tqdm
 from torchsummary import summary
+from einops import reduce
 
 ## Encoder Dependencies
 from torchvision.transforms.v2 import Compose, Resize, ToTensor, Normalize
@@ -41,6 +44,7 @@ from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
 from diffusion_dataloaders import load_data
 from transformers import CLIPModel, CLIPProcessor
+from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 
 import wandb
 import gc
@@ -59,6 +63,18 @@ def save_config(config_dict, output_path):
     with open(config_file, 'w') as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
     print(f"Saved configuration to {config_file}")
+
+def dict_apply(
+        x: Dict[str, torch.Tensor], 
+        func: Callable[[torch.Tensor], torch.Tensor]
+        ) -> Dict[str, torch.Tensor]:
+    result = dict()
+    for key, value in x.items():
+        if isinstance(value, dict):
+            result[key] = dict_apply(value, func)
+        else:
+            result[key] = func(value)
+    return result
 
 # Action space:      [left_arm_qpos (6),             # absolute joint position
 #                         left_gripper_positions (1),    # normalized gripper position (0: close, 1: open)
@@ -198,6 +214,7 @@ class TrainDiffusIn:
         vision_lr,
         noise_predictor_lr,
         weight_decay,
+        save_every,
         track_wandb=True,
         ema_power=0.75,
         files_output_path=None,
@@ -213,6 +230,7 @@ class TrainDiffusIn:
         self.execution_horizon = execution_horizon
         self.device = device
         self.num_epochs = num_epochs
+        self.save_every = save_every
         self.diffusion_timesteps = diffusion_timesteps
         self.track_wandb = track_wandb
         self.files_output_path = files_output_path
@@ -262,10 +280,70 @@ class TrainDiffusIn:
             prediction_type="epsilon",
         )
 
+        self.mask_generator = LowdimMaskGenerator(
+            action_dim=action_dim,
+            obs_dim=0,
+            max_n_obs_steps=2, # TODO make configurable
+            fix_obs_steps=True,
+            action_visible=False
+        )
+
         # L2 loss
         self.loss_fn = torch.nn.MSELoss()
 
         self.ema_nets = self.model
+
+    def training_step(self, batch):
+        nimage = batch["image"]
+        nagent_pos = batch["q_pos"]
+        naction = batch["action"]
+        B = naction.shape[0]
+        horizon = naction.shape[1]
+
+        # generate global conditioning vector
+        # reshape B, T, ... to B*T
+        this_nimage = dict_apply(nimage, 
+            lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
+        this_nagent_pos = dict_apply(nagent_pos, 
+            lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
+
+        # generate conditioning mask
+        condition_mask = self.mask_generator(naction.shape)
+
+        # sample noise to add to actions
+        noise = torch.randn(naction.shape, device=self.device)
+        # sample a diffusion iteration for each data point
+        timesteps = torch.randint(
+            low=0,
+            high=self.noise_scheduler.config["num_train_timesteps"],
+            size=(B,),
+            device=self.device,
+        ).long()
+
+        # add noise to the clean images according to the noise magnitude at each diffusion iteration
+        # (this is the forward diffusion process)
+        noisy_actions = self.noise_scheduler.add_noise(
+            naction, noise, timesteps
+        )
+
+        # compute loss mask
+        loss_mask = ~condition_mask
+
+        # apply conditioning mask
+        noisy_actions[condition_mask] = naction[condition_mask]
+
+        # predict the noise
+        noise_pred = self.model(
+            this_nimage, this_nagent_pos, noisy_actions, timesteps
+        )
+
+        # calculate loss
+        loss = self.loss_fn(noise_pred, noise, reduction='none')
+        loss = loss * loss_mask.type(loss.dtype)
+        loss = reduce(loss, 'b ... -> b (...)', 'mean')
+        loss = loss.mean()
+        return loss
+
 
     def train(self):
         """Training Loop for Diffusion Model"""
@@ -282,94 +360,12 @@ class TrainDiffusIn:
 
                 with tqdm(self.train_dataloader, desc="Batch", leave=False) as t_epoch:
                     for nbatch in t_epoch:
-                        # Find valid start and end indices for observation and action sequences from the ORIGINAL unpadded data
-                        # Using different start and end indices for each sample in the batch
-                        # so that the model does not overfit to fixed positions in the sequences
-                        start_index_action = np.random.randint(self.obs_horizon, nbatch["lengths"] - self.action_horizon)      
-                        start_index_obs = start_index_action - self.obs_horizon
-                        
-                        #TODO: Can be moved into dataloader for efficiency
-                        indices_arr = []
-                        B = nbatch["image"].shape[0]
-                        lower = self.obs_horizon
-                        upper = (torch.min(nbatch["lengths"]) - self.action_horizon).item()
-                        indices = np.array(range(lower, upper, self.action_horizon))
-                        stacked_indices = np.tile(indices, (B, 1))
-                        for i in range(stacked_indices.shape[0]):
-                            np.random.shuffle(stacked_indices[i])
-                        
-                        batch_loss = 0.0
-                        with tqdm(range(stacked_indices.shape[1]), desc="Sequence", leave=False) as t_seq:
-                            for i in range(stacked_indices.shape[1]):
-                                # Using numpy advanced indexing to select variable length sequences from the padded batch
-                                start_index_obs = stacked_indices[:, i] - self.obs_horizon
-                                start_index_action = stacked_indices[:, i]
-                                # Create indices between start and end indices for each element in the batch
-                                obs_idx = start_index_obs[:, None] + np.arange(self.obs_horizon)[None, :]
-                                action_idx = start_index_action[:, None] + np.arange(self.action_horizon)[None, :]
-                                
-                                # Splice out the relevant sequences using the above indices
-                                nimage = nbatch["image"][np.arange(B)[:, None], obs_idx].to(self.device)
-                                nagent_pos = nbatch["q_pos"][np.arange(B)[:, None], obs_idx].to(self.device)
-                                naction = nbatch["action"][np.arange(B)[:, None], action_idx].to(self.device)
-
-                                # Save images to visualize later if needed
-                                if self.debug:
-                                    for img_idx in range(nbatch["image"].shape[1]):
-                                        img = (
-                                            nbatch["image"][0, img_idx, :, :, :]
-                                            .detach()
-                                            .cpu()
-                                            .numpy()
-                                        )
-                                        img = (img * 255).astype(np.uint8)  # 3 x 480 x 640
-                                        img_pil = Image.fromarray(
-                                            np.transpose(img, (1, 2, 0))
-                                        )  # H x W x 3
-                                        os.makedirs(
-                                            "data/diffusion_training_vis", exist_ok=True
-                                        )
-                                        img_pil.save(
-                                            f"data/diffusion_training_vis/epoch{epoch_idx}_img{img_idx}.png"
-                                        )
-
-                                # sample noise to add to actions
-                                noise = torch.randn(
-                                    naction.shape, device=self.device
-                                )  # randn is random normal
-                                # sample a diffusion iteration for each data point
-                                # NOTE: What is this step doing? <- samples a random timestep to add noise up to.
-                                # this teaches the model to denoise from any timestep. more efficient than training on all timesteps,
-                                # because we know the mathematical relationship between any timestep in the diffusion process
-                                timesteps = torch.randint(
-                                    low=0,
-                                    high=self.noise_scheduler.config["num_train_timesteps"],
-                                    size=(B,),
-                                    device=self.device,
-                                ).long()
-
-                                # add noise to the clean images according to the noise magnitude at each diffusion iteration
-                                # (this is the forward diffusion process)
-                                noisy_actions = self.noise_scheduler.add_noise(
-                                    naction, noise, timesteps
-                                )
-
-                                # predict the noise
-                                noise_pred = self.model(
-                                    nimage, nagent_pos, noisy_actions, timesteps
-                                )
-
-                                # calculate loss
-                                loss_val = self.loss_fn(noise_pred, noise)
-                                
-                                # Calculate gradients for every batch instead of every sequence
-                                # Average gradients to avoid exploding gradients
-                                (loss_val / stacked_indices.shape[1]).backward()
-                                # Add mean of every sequence loss to get batch loss
-                                batch_loss += (loss_val.detach() / stacked_indices.shape[1])
+                        # move batch to device
+                        nbatch = dict_apply(nbatch, lambda x: x.to(self.device, non_blocking=True))
+                        loss = self.training_step(nbatch)
                         
                         # optimize
-                        # this is different from standard pytorch behavior #NOTE: Understand why they are doing so
+                        loss.backward()
                         self.optimizer.step()
                         self.optimizer.zero_grad()
 
@@ -379,10 +375,9 @@ class TrainDiffusIn:
                         self.ema.step(self.model.parameters())
                         
                         # logging
-                        loss_cpu = batch_loss.item()
+                        loss_cpu = loss.item()
                         epoch_loss.append(loss_cpu)
                         t_epoch.set_postfix(loss=loss_cpu)
-                        # self.loss_per_ep[epoch_idx].append(loss_cpu)
                         if self.track_wandb:
                             wandb.log(
                                 {
@@ -397,42 +392,39 @@ class TrainDiffusIn:
                 if self.track_wandb:
                     wandb.log({"train/epoch_loss": np.mean(epoch_loss)})
 
-                # Per trajectory loss over time
-                # for traj_idx in range(NUM_EPISODES):
-                #     wandb.log({f"traj/traj_{traj_idx}": self.loss_per_ep[traj_idx][-1]})
-
-                # Save this model
-                self.ema.copy_to(self.ema_nets.parameters())
-                torch.save(
-                    {
-                        "model_state_dict": self.ema_nets.state_dict(),
-                        "optimizer_state_dict": self.optimizer.state_dict(),
-                        "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
-                    },
-                    f"{self.files_output_path}/last_diffusion_model_checkpoint.pth",
-                )
-                print(
-                    f"Saved last_model_checkpoint at {self.files_output_path}/last_diffusion_model_checkpoint.pth"
-                )
-
-                # Save this as the best model if validation loss improves
-                if least_val_loss > loss_cpu:
-                    least_val_loss = loss_cpu
+                
+                if epoch_idx % self.save_every == 0:
+                    # Save this model
+                    self.ema.copy_to(self.ema_nets.parameters())
                     torch.save(
                         {
                             "model_state_dict": self.ema_nets.state_dict(),
                             "optimizer_state_dict": self.optimizer.state_dict(),
                             "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
                         },
-                        f"{self.files_output_path}/best_diffusion_model_e{epoch_idx}.pth",
+                        f"{self.files_output_path}/diffusion_model_checkpoint_e{epoch_idx}.pth",
                     )
                     print(
-                        f"Saved best_model_checkpoint at {self.files_output_path}/best_diffusion_model_e{epoch_idx}.pth"
+                        f"Saved last_model_checkpoint at {self.files_output_path}/diffusion_model_checkpoint_e{epoch_idx}.pth"
                     )
                     
                 if self.track_wandb:
                     for wandb_file in os.listdir(self.files_output_path):
                         wandb.save(f"{self.files_output_path}/{wandb_file}")
+
+        # Save last model checkpoint
+        self.ema.copy_to(self.ema_nets.parameters())
+        torch.save(
+            {
+                "model_state_dict": self.ema_nets.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
+            },
+            f"{self.files_output_path}/last_diffusion_model_checkpoint.pth",
+        )
+        print(
+            f"Saved last_model_checkpoint at {self.files_output_path}/last_diffusion_model_checkpoint.pth"
+        )
 
 
 if __name__ == "__main__":
@@ -440,12 +432,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Diffusion Policy")
     
     # Training arguments
-    parser.add_argument("--num-epochs", type=int, default=100,
+    parser.add_argument("--num-epochs", type=int, default=1000,
                        help="Number of training epochs (default: 100)")
     parser.add_argument("--num-episodes", type=int, default=100,
-                       help="Number of episodes in dataset (default: 100)")
-    parser.add_argument("--batch-size", type=int, default=1,
-                       help="Batch size for training (default: 1)")
+                       help="Number of episodes to load from dataset (default: 100)")
+    parser.add_argument("--batch-size", type=int, default=4,
+                       help="Batch size for training (default: 4)")
     parser.add_argument("--num-train-timesteps", type=int, default=100,
                        help="Number of diffusion timesteps (default: 100)")
     parser.add_argument("--ema-power", type=float, default=0.75,
@@ -595,6 +587,7 @@ if __name__ == "__main__":
         device=device,
         diffusion_timesteps=args.num_train_timesteps,
         num_epochs=args.num_epochs,
+        save_every=10, # TODO make configurable
         track_wandb=not args.no_track,
         ema_power=args.ema_power,
         files_output_path=files_output_path,
