@@ -1,9 +1,9 @@
 # Baseline training scripts for Abhishek's experiments
 python src/diffusion_train.py \
-    --batch-size 4 \
-    --num-epochs 100 \
+    --batch-size 32 \
+    --num-epochs 50 \
     --num-episodes 100 \
-    --num-train-timesteps 100 \
+    --num-train-timesteps 1000 \
     --ema-power 0.75 \
     --vision-lr 1e-5 \
     --noise-predictor-lr 1e-4 \
@@ -17,5 +17,4 @@ python src/diffusion_train.py \
     --dataset-path data \
     --wandb-entity mrsd-smores \
     --wandb-project diffusIn-training \
-    --device cuda:0 \
-    --no-track
+    --device cuda:0

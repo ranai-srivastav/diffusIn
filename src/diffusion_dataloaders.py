@@ -375,8 +375,8 @@ def load_chunked_data(
         batch_size=batch_size_train,
         shuffle=True,
         pin_memory=True,
-        num_workers=4,
-        prefetch_factor=1,
+        num_workers=12,
+        prefetch_factor=2,
         persistent_workers=True,
     )
     val_dataloader = DataLoader(
