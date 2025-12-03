@@ -93,7 +93,10 @@ class InferDiffusIn:
         self.stats = config.get("dataset_stats", None)
         self.debug = debug
         self.file_path = file_path
-        self.checkpoint_name = checkpoint_name
+        if checkpoint_name is None:
+            self.checkpoint_name = "last_diffusion_model_checkpoint.pth"
+        else:
+            self.checkpoint_name = checkpoint_name
 
 
         self.noise_scheduler = DDPMScheduler(
@@ -120,10 +123,8 @@ class InferDiffusIn:
             vision_encoder=self.vision_encoder,
             device=self.device,
         )
-        if checkpoint_name is None:
-            checkpoint_path = Path(file_path) / ("last_diffusion_model_checkpoint.pth")
-        else:
-            checkpoint_path = Path(file_path) / checkpoint_name
+    
+        checkpoint_path = Path(file_path) / self.checkpoint_name
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
         checkpoint = torch.load(str(checkpoint_path), map_location=self.device)
@@ -178,6 +179,8 @@ class InferDiffusIn:
         # Reset environment with random peg and socket pose
         # TODO: Initialize env with the same peg and socket pose as the training data
         peg_pose, socket_pose = act_utils.sample_insertion_pose()
+        print("Peg Pose: ", peg_pose)
+        print("Socket Pose: ", socket_pose)
         act_sim_env.BOX_POSE[0] = np.concatenate([peg_pose, socket_pose])
         ts = env.reset()
 
@@ -379,7 +382,6 @@ if __name__ == "__main__":
     env = act_sim_env.make_sim_env("sim_insertion")
     parser = argparse.ArgumentParser(description="Diffusion Policy Inference")
     
-    # Training arguments
     parser.add_argument("--file_dir_path", type=str, required=True,
                         help="Path to the config.yaml file")
     parser.add_argument("--checkpoint_name", type=str, default=None,)
@@ -387,6 +389,10 @@ if __name__ == "__main__":
                         help="Device to run the model on (default: cuda if available else cpu)")
     parser.add_argument("--max_steps", type=int, default=500,
                         help="Maximum number of steps to run in the environment")
+    parser.add_argument("--render_onscreen", action="store_true", default=False,
+                        help="Render the environment onscreen")
+    parser.add_argument("--save_gif", action="store_true", default=False,
+                        help="Render the environment offscreen and save as GIF")
     args = parser.parse_args()
     evaluator = InferDiffusIn(file_path=args.file_dir_path, checkpoint_name=args.checkpoint_name, device=args.device)
-    evaluator.eval(env, max_steps=args.max_steps, render_offscreen=False, render_onscreen=True)
+    evaluator.eval(env, max_steps=args.max_steps, render_offscreen=args.save_gif, render_onscreen=args.render_onscreen)
