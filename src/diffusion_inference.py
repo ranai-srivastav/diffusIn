@@ -10,7 +10,7 @@ import yaml
 
 
 CAMERA_KEYS = ("top", "angle", "vis")  # available in env observations
-FPS = 20
+FPS = 50
 
 sys.path.extend(
     [
