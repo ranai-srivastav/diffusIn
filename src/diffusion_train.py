@@ -143,7 +143,7 @@ class DiffusionModel(torch.nn.Module):
         obs_horizon,
         vision_encoder: VisionEncoder,
         device,
-        multiview=True,
+        multiview=False,
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -314,8 +314,10 @@ class TrainDiffusIn:
         # generate global conditioning vector
         # Vision encoder input needs to be B, obs_horizon, 3, 384, 384
         if self.multiview:
+            # B, 3 (num views), obs_horizon, 3 (channels), 384, 384 ->
             # B, [top1, top2, angle1, angle2, vis1, vis2], 3, 384, 384
-            this_nimage = nimage[:, :self.obs_horizon*3,...]
+            this_nimage = nimage.reshape(B, self.obs_horizon*3, *nimage.shape[-3:])
+            this_nimage = this_nimage[:, :self.obs_horizon*3,...]
         else:
             this_nimage = nimage[:, :self.obs_horizon,...]
         this_nagent_pos = nagent_pos[:, :self.obs_horizon,...]
@@ -559,6 +561,7 @@ if __name__ == "__main__":
         obs_horizon=args.obs_horizon,
         vision_encoder=vision_encoder,
         device=device,
+        multiview=args.multiview,
     )
 
     model.to(device=device)
