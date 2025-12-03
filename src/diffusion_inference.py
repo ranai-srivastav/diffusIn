@@ -363,6 +363,8 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_name", type=str, default=None,)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Device to run the model on (default: cuda if available else cpu)")
+    parser.add_argument("--max_steps", type=int, default=500,
+                        help="Maximum number of steps to run in the environment")
     args = parser.parse_args()
     evaluator = InferDiffusIn(file_path=args.file_dir_path, checkpoint_name=args.checkpoint_name, device=args.device)
-    evaluator.eval(env, max_steps=20, render=True)
+    evaluator.eval(env, max_steps=args.max_steps, render=True)

@@ -115,14 +115,13 @@ class ChunkedSequencesDataset(torch.utils.data.Dataset):
                 episode_len = root["/action"].shape[0]
                 self.episode_lengths.append(episode_len)
 
-        # Create random index mapping from chunk index to (episode index, start index)
+        # Create random index mapping (episode index, start index)
         self.index_mapping = []
         for ep_idx, ep_len in enumerate(self.episode_lengths):
-            num_full_chunks = ep_len // self.chunk_size
+            num_full_chunks = ep_len - self.chunk_size + 1
             self.num_chunks += num_full_chunks
             for chunk_idx in range(num_full_chunks):
-                start_idx = chunk_idx * self.chunk_size
-                self.index_mapping.append((ep_idx, start_idx))
+                self.index_mapping.append((ep_idx, chunk_idx))
 
     def __len__(self):
         return len(self.index_mapping)
