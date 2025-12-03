@@ -587,7 +587,7 @@ if __name__ == "__main__":
     # NOTE: Cannot pass num_episodes = 1 because train/val split fails
     # Load chunked sequence dataset
     train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_chunked_data(
-        dataset_path, args.num_episodes, ["top"], args.batch_size, 1, args.obs_horizon, args.action_horizon, args.multiview
+        dataset_path, args.num_episodes, ["top"], args.batch_size, 1, args.obs_horizon, args.pred_horizon, args.multiview
     )
 
     print(f"Dataset stats: {norm_dataset_stats}")

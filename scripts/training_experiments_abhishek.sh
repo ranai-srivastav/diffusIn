@@ -11,7 +11,7 @@ python src/diffusion_train.py \
     --state-dim 14 \
     --obs-horizon 2 \
     --action-dim 14 \
-    --action-horizon 8 \
+    --pred-horizon 8 \
     --execution-horizon 4 \
     --vision-encoder OpenVision-vit-tiny \
     --dataset-path data_recorded \

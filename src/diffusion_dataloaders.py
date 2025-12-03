@@ -94,11 +94,12 @@ class ChunkedSequencesDataset(torch.utils.data.Dataset):
         self.camera_names = camera_names
         self.norm_stats = norm_stats
         self.is_sim = None
-        self.chunk_size = pred_horizon
-        self.obs_horizon = obs_horizon
+        # TODO: chunk size = obs_horizon right now, FIX LATER
+        self.chunk_size = chunk_size
+        self.obs_horizon = chunk_size
         self.num_chunks = 0
         self.action_horizon = action_horizon
-        self.multiview = True  # only top view for now
+        self.multiview = multiview
 
         # Get filepaths for all episodes
         human_episodes = sorted(
