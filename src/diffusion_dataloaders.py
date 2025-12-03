@@ -143,15 +143,13 @@ class ChunkedSequencesDataset(torch.utils.data.Dataset):
 
             if self.multiview:
                 # Flattened Implementation for multiview
-                # total_size = self.chunk_size + self.action_horizon
-                # data_dict["image"] = np.zeros((3 * (total_size), 480, 640, 3), dtype=np.uint8)
-                # data_dict["image"][:total_size] = root["/observations/images/top"][start_idx - self.chunk_size : start_idx + self.action_horizon]
-                # data_dict["image"][total_size : 2*total_size] = root["/observations/images/angle"][start_idx - self.chunk_size : start_idx + self.action_horizon]
-                # data_dict["image"][2*total_size : 3*total_size] = root["/observations/images/vis"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+                # data_dict["image"] = np.zeros((3 * (self.obs_horizon), 480, 640, 3), dtype=np.uint8)
+                # data_dict["image"][:total_size] = root["/observations/images/top"][start_idx : start_idx + self.obs_horizon]
+                # data_dict["image"][total_size : 2*total_size] = root["/observations/images/angle"][start_idx : start_idx + self.obs_horizon]
+                # data_dict["image"][2*total_size : 3*total_size] = root["/observations/images/vis"][start_idx : start_idx + self.obs_horizon]
 
                 # Stacked Implementation for multiview
-                total_size = self.chunk_size + self.action_horizon
-                data_dict["image"] = np.zeros((3, total_size, 480, 640, 3), dtype=np.uint8)
+                data_dict["image"] = np.zeros((3, self.obs_horizon, 480, 640, 3), dtype=np.uint8)
                 data_dict["image"][0] = root["/observations/images/top"][start_idx : start_idx + self.obs_horizon]
                 data_dict["image"][1] = root["/observations/images/angle"][start_idx : start_idx + self.obs_horizon]
                 data_dict["image"][2] = root["/observations/images/vis"][start_idx : start_idx + self.obs_horizon]
