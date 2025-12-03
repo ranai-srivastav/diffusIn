@@ -86,7 +86,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         return values
     
 class ChunkedSequencesDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, chunk_size, action_horizon):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, chunk_size, action_horizon, multiview=False):
         super(ChunkedSequencesDataset, self).__init__()
 
         self.episode_ids = episode_ids
@@ -97,6 +97,7 @@ class ChunkedSequencesDataset(torch.utils.data.Dataset):
         self.chunk_size = chunk_size
         self.num_chunks = 0
         self.action_horizon = action_horizon
+        self.multiview = True  # only top view for now
 
         # Get filepaths for all episodes
         human_episodes = sorted(
@@ -139,17 +140,38 @@ class ChunkedSequencesDataset(torch.utils.data.Dataset):
 
             data_dict["q_pos"] = root["/observations/qpos"][start_idx - self.chunk_size : start_idx + self.action_horizon]
             data_dict["q_vel"] = root["/observations/qvel"][start_idx - self.chunk_size : start_idx + self.action_horizon]
-            data_dict["image"] = root["/observations/images/top"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+            if self.multiview:
+                # Flattened Implementation for multiview
+                # total_size = self.chunk_size + self.action_horizon
+                # data_dict["image"] = np.zeros((3 * (total_size), 480, 640, 3), dtype=np.uint8)
+                # data_dict["image"][:total_size] = root["/observations/images/top"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+                # data_dict["image"][total_size : 2*total_size] = root["/observations/images/angle"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+                # data_dict["image"][2*total_size : 3*total_size] = root["/observations/images/vis"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+
+                # Stacked Implementation for multiview
+                total_size = self.chunk_size + self.action_horizon
+                data_dict["image"] = np.zeros((3, total_size, 480, 640, 3), dtype=np.uint8)
+                data_dict["image"][0] = root["/observations/images/top"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+                data_dict["image"][1] = root["/observations/images/angle"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+                data_dict["image"][2] = root["/observations/images/vis"][start_idx - self.chunk_size : start_idx + self.action_horizon]
+            else:
+                data_dict["image"] = root["/observations/images/top"][start_idx - self.chunk_size : start_idx + self.action_horizon]
             data_dict["action"] = root["/action"][start_idx - self.chunk_size : start_idx + self.action_horizon]
 
         # construct observations
         data_dict = dict_apply(data_dict, lambda x: torch.from_numpy(x).float())
 
         # channel last
-        data_dict["image"] = torch.einsum("k h w c -> k c h w", data_dict["image"])
+        # if self.multiview:
+        #     for key in data_dict["image"]:
+        #         data_dict["image"][key] = torch.einsum("k h w c -> k c h w", data_dict["image"][key])
+        #         data_dict["image"][key] = data_dict["image"][key] / 255.0
+
+        # else:
+        data_dict["image"] = torch.einsum(" ... k h w c -> ... k c h w", data_dict["image"])
+        data_dict["image"] = data_dict["image"] / 255.0
 
         # normalize data
-        data_dict["image"] = data_dict["image"] / 255.0
         data_dict["action"] = (data_dict["action"] - self.norm_stats["action_mean"]) / self.norm_stats["action_std"]
         data_dict["q_pos"] = (data_dict["q_pos"] - self.norm_stats["qpos_mean"]) / self.norm_stats["qpos_std"]
         data_dict["q_vel"] = (data_dict["q_vel"] - self.norm_stats["qvel_mean"]) / self.norm_stats["qvel_std"]
@@ -353,7 +375,7 @@ def set_seed(seed):
     np.random.seed(seed)
     
 def load_chunked_data(
-    dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, chunk_size, action_horizon
+    dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, chunk_size, action_horizon, multiview=False
 ):
     print(f"\nData from: {dataset_dir}\n")
     # obtain train test split
@@ -368,7 +390,7 @@ def load_chunked_data(
     # construct dataset and dataloader
     assert (num_episodes > 1), "num_episodes must be greater than 1 to perform train/val split."
     
-    train_dataset = ChunkedSequencesDataset(train_indices, dataset_dir, camera_names, norm_stats, chunk_size, action_horizon)
+    train_dataset = ChunkedSequencesDataset(train_indices, dataset_dir, camera_names, norm_stats, chunk_size, action_horizon, multiview=multiview)
     val_dataset = ChunkedSequencesDataset(val_indices, dataset_dir, camera_names, norm_stats, chunk_size, action_horizon)
     train_dataloader = DataLoader(
         train_dataset,

@@ -143,18 +143,25 @@ class DiffusionModel(torch.nn.Module):
         obs_horizon,
         vision_encoder,
         device,
+        multiview=True,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.obs_dim = obs_dim
         self.obs_horizon = obs_horizon
         self.device = device
+        self.multiview = multiview
 
         self.vision_encoder = vision_encoder
 
         # TODO: What order does Conv!D exepect it in? Is it (B, C, L) or (B, L, C)?
+        if multiview:
+            self.obs_feature_dim = obs_dim * obs_horizon * 3  # 3 views
+        else:
+            self.obs_feature_dim = obs_dim * obs_horizon
+
         self.noise_predictor = ConditionalUnet1D(
-            action_dim=action_dim, global_cond_dim=obs_dim * obs_horizon
+            action_dim=action_dim, global_cond_dim=self.obs_feature_dim
         )
 
     def forward(self, image, pos, noisy_actions, timesteps):
@@ -173,8 +180,13 @@ class DiffusionModel(torch.nn.Module):
 
         # concatenate vision feature and agent positions
         # TODO:Agent positions need to be raw inputs or embeddings?
-        obs_features = torch.cat([image_features, pos], dim=-1)  # D -> D + state_dim = obs_dim
-        obs_cond = obs_features.flatten(start_dim=1)
+        if self.multiview:
+            pos_repeated = pos.repeat(1, 3, 1)  # B, obs_horizon, state_dim -> B, obs_horizon*3, state_dim
+            obs_features = torch.cat([image_features, pos_repeated], dim=-1)  # D -> D + state_dim = obs_dim
+            obs_cond = obs_features.flatten(start_dim=1)
+        else:
+            obs_features = torch.cat([image_features, pos], dim=-1)  # D -> D + state_dim = obs_dim
+            obs_cond = obs_features.flatten(start_dim=1)
         # (B, obs_horizon * obs_dim)
 
         # predict the noise residual
@@ -206,6 +218,7 @@ class TrainDiffusIn:
         ema_power=0.75,
         files_output_path=None,
         debug=False,
+        multiview=False,
     ):
         self.model = model
         self.train_dataloader = train_dataloader
@@ -224,6 +237,7 @@ class TrainDiffusIn:
         self.debug = debug
         self.vision_lr = vision_lr
         self.noise_predictor_lr = noise_predictor_lr
+        self.multiview = multiview
         self.weight_decay = weight_decay
 
         ## Exponential Moving Average improves Training Stability
@@ -289,7 +303,10 @@ class TrainDiffusIn:
 
         # generate global conditioning vector
         # reshape B, T, ... to B*T
-        this_nimage = nimage[:, :self.obs_horizon,...].reshape(-1, *nimage.shape[2:])
+        if self.multiview:
+            this_nimage = nimage[:, :, :self.obs_horizon,...].reshape(-1, *nimage.shape[-3:])
+        else:
+            this_nimage = nimage[:, :self.obs_horizon,...].reshape(-1, *nimage.shape[2:])
         this_nagent_pos = nagent_pos[:, :self.obs_horizon,...].reshape(-1, *nagent_pos.shape[2:])
         this_naction = naction[:, :self.action_horizon,...]
         # this_nimage = dict_apply(nimage, 
@@ -325,9 +342,15 @@ class TrainDiffusIn:
         # predict the noise
         # Vision encoder input needs to be B, obs_horizon, 3, 384, 384
         # reshape this_nimage and this_nagent_pos accordingly
-        this_nimage = this_nimage.reshape(
-            B, self.obs_horizon, *this_nimage.shape[1:]
-        )
+        if self.multiview:
+            # B, [top1, top2, angle1, angle2, vis1, vis2], 3, 384, 384
+            this_nimage = this_nimage.reshape(
+                B, 3*self.obs_horizon, *this_nimage.shape[1:]
+            )
+        else:
+            this_nimage = this_nimage.reshape(
+                B, self.obs_horizon, *this_nimage.shape[1:]
+            )
         this_nagent_pos = this_nagent_pos.reshape(
             B, self.obs_horizon, *this_nagent_pos.shape[1:]
         )
@@ -433,7 +456,7 @@ if __name__ == "__main__":
     # Training arguments
     parser.add_argument("--num-epochs", type=int, default=1000,
                        help="Number of training epochs (default: 100)")
-    parser.add_argument("--num-episodes", type=int, default=100,
+    parser.add_argument("--num-episodes", type=int, default=15,
                        help="Number of episodes to load from dataset (default: 100)")
     parser.add_argument("--batch-size", type=int, default=4,
                        help="Batch size for training (default: 4)")
@@ -447,6 +470,8 @@ if __name__ == "__main__":
                        help="Learning rate for noise predictor (default: 1e-4)")
     parser.add_argument("--weight-decay", type=float, default=1e-6,
                        help="Weight decay for optimizer (default: 1e-6)")
+    parser.add_argument("--multiview", action="store_true",
+                       help="Use multiview images (default: False)")
     
     # Model arguments
     parser.add_argument("--state-dim", type=int, default=14,
@@ -464,7 +489,7 @@ if __name__ == "__main__":
                        help="Vision encoder type (default: OpenVision-vit-tiny)")
     
     # Path arguments
-    parser.add_argument("--dataset-path", type=str, default="data",
+    parser.add_argument("--dataset-path", type=str, default="data_recorded",
                        help="Path to dataset directory (default: data)")
     
     # WandB arguments
@@ -519,6 +544,7 @@ if __name__ == "__main__":
             "vision_lr": args.vision_lr,
             "noise_predictor_lr": args.noise_predictor_lr,
             "weight_decay": args.weight_decay,
+            "multiview": args.multiview,
         },
         "model": {
             "vision_feature_dim": args.vision_feature_dim,
@@ -547,7 +573,7 @@ if __name__ == "__main__":
 
     model.to(device=device)
     print("Initialized Diffusion Model:")
-    print(model)
+    # print(model)
     
     # Dataset and Dataloader
     # NOTE: Cannot pass num_episodes = 1 because train/val split fails
@@ -557,7 +583,7 @@ if __name__ == "__main__":
 
     # Load chunked sequence dataset
     train_dataloader, val_dataloader, norm_dataset_stats, is_sim = load_chunked_data(
-        dataset_path, args.num_episodes, ["top"], args.batch_size, 1, args.obs_horizon, args.action_horizon
+        dataset_path, args.num_episodes, ["top"], args.batch_size, 1, args.obs_horizon, args.action_horizon, args.multiview
     )
     
     # Initialize WandB if tracking is enabled
@@ -578,6 +604,7 @@ if __name__ == "__main__":
             "vision_lr": args.vision_lr,
             "noise_predictor_lr": args.noise_predictor_lr,
             "weight_decay": args.weight_decay,
+            "multiview": args.multiview,
             "device": str(device),
         }
         init_wandb(entity=args.wandb_entity, project=args.wandb_project, config_dict=wandb_config)
@@ -603,5 +630,6 @@ if __name__ == "__main__":
         vision_lr=args.vision_lr,
         noise_predictor_lr=args.noise_predictor_lr,
         weight_decay=args.weight_decay,
+        multiview=args.multiview,
     )
     trainer.train()
