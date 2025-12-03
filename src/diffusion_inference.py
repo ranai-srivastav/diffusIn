@@ -8,6 +8,10 @@ from tqdm import tqdm
 from PIL import Image
 import yaml
 
+
+CAMERA_KEYS = ("top", "angle", "vis")  # available in env observations
+FPS = 20
+
 sys.path.extend(
     [
         str(Path("include").resolve()),
@@ -34,33 +38,7 @@ def parse_config(config_path):
         config_path: Path to config.yaml file (can be a string or Path object)
         
     Returns:
-        dict: Configuration dictionary with the following structure:
-            {
-                "training": {
-                    "num_epochs": int,
-                    "num_episodes": int,
-                    "batch_size": int,
-                    "num_train_timesteps": int,
-                    "ema_power": float,
-                },
-                "model": {
-                    "vision_feature_dim": int,
-                    "state_dim": int,
-                    "observation_horizon": int,
-                    "observation_dim": int,
-                    "action_dim": int,
-                    "action_horizon": int,
-                    "execution_horizon": int,
-                    "vision_encoder": str,
-                },
-                "wandb": {
-                    "entity": str,
-                    "project": str,
-                    "track": bool,
-                },
-                "debug": bool,
-                "device": str,
-            }
+        dict: Configuration dictionary
             
     Raises:
         FileNotFoundError: If config file doesn't exist
@@ -85,24 +63,41 @@ def parse_config(config_path):
         "training": config.get("training", {}),
         "model": config.get("model", {}),
     }
-    
+
+    # Load dataset stats
+    dataset_stats = config.get("dataset_stats", None)
+    if dataset_stats is None:
+        raise ValueError(f"Config file does not contain dataset stats: {config_path}")
+
+    stats = {
+        "action_mean": np.asarray(dataset_stats.get("action_mean")),
+        "action_std": np.asarray(dataset_stats.get("action_std")),
+        "qpos_mean": np.asarray(dataset_stats.get("qpos_mean")),
+        "qpos_std": np.asarray(dataset_stats.get("qpos_std")),
+        "qvel_mean": np.asarray(dataset_stats.get("qvel_mean")),
+        "qvel_std": np.asarray(dataset_stats.get("qvel_std")),
+    }
+    validated_config["dataset_stats"] = stats
+
     return validated_config
 
 class InferDiffusIn:
-    def __init__(self, file_path, checkpoint_name=None, debug=False):
+    def __init__(self, file_path, checkpoint_name=None, device="cuda" if torch.cuda.is_available() else "cpu", debug=False):
 
         config = parse_config(Path(file_path) / "config.yaml")
-        self.num_epochs = config["training"].get("num_epochs", 100)
         self.diffusion_timesteps = config["training"].get("num_train_timesteps", 100)
-        self.device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
-        self.action_horizon = config["model"].get("action_horizon", 8)
+        self.device = device
+        self.pred_horizon = config["model"].get("pred_horizon", 8)
         self.execution_horizon = config["model"].get("execution_horizon", 4)
+        self.obs_horizon = config["model"].get("observation_horizon", 2)
+        self.stats = config.get("dataset_stats", None)
         self.debug = debug
         self.file_path = file_path
         self.checkpoint_name = checkpoint_name
 
+
         self.noise_scheduler = DDPMScheduler(
-            num_train_timesteps=config["training"].get("num_train_timesteps", 100),
+            num_train_timesteps=self.diffusion_timesteps,
             # the choice of beta schedule has big impact on performance
             # we found squared cosine works the best
             beta_schedule="squaredcos_cap_v2",
@@ -121,7 +116,7 @@ class InferDiffusIn:
             state_dim=config["model"].get("state_dim", 14),
             obs_dim=config["model"].get("observation_dim", 206),
             action_dim=config["model"].get("action_dim", 14),
-            obs_horizon=config["model"].get("observation_horizon", 8),
+            obs_horizon=self.obs_horizon,
             vision_encoder=self.vision_encoder,
             device=self.device,
         )
@@ -135,21 +130,53 @@ class InferDiffusIn:
         self.ema_nets.load_state_dict(checkpoint["model_state_dict"])
         print(f"Loaded model checkpoint from {checkpoint_path}")
 
+    def _capture_views(self, ts):
+        """Capture frames from the environment observations"""
+        obs_imgs = ts.observation["images"]
+        imgs = []
+        for cam in CAMERA_KEYS:
+            img = obs_imgs[cam]
+            if img.dtype != np.uint8:
+                img = np.clip(img, 0, 255).astype(np.uint8)
+            imgs.append(img)
+        return imgs
+
+    def _stack_vertical(self, imgs):
+        """Stack images vertically"""
+        h_min = min(im.shape[0] for im in imgs)
+        w_min = min(im.shape[1] for im in imgs)
+        imgs_cropped = [im[:h_min, :w_min, :] for im in imgs]
+        stacked = np.concatenate(imgs_cropped, axis=0)
+        return stacked
+
+    def _get_frame_from_env(self, ts):
+        """Get frame from environment observations"""
+        imgs = self._capture_views(ts)
+        stacked = self._stack_vertical(imgs)
+        return stacked
+
     def eval(self, env, max_steps=500, render=False):  # default values taken from TRI example, should change
         """Evaluation Loop for Diffusion Model"""
-        # |o|o|o|o|o|o|o|o|                 observations: 8
-        # |p|p|p|p|p|p|p|p|                 action predictions: 8
-        # | | | | | | | | |a|a|a|a|a|       actions executed: 4
+#         in training:
+        # |o|o|o|o|o|o|o|o|                 pred_horizon: 8
+        # |h|h| | | | | | |                 obs_horizon: 2
+        # given conditioning of length obs_horizon, we predict the action seq for the whole pred_horizon 
+        # (with conditioning mask, not pictured) 
+
+        # in eval:
+        # |o|o|o|o|o|o|o|o|                 pred_horizon: 8
+        # |h|h| | | | | | |                 obs_horizon: 2
+        # | |a|a|a|a| | | |              execution_horizon: 4
+        # given conditioning of length obs_horizon, we predict action seq for the whole pred_horizon, 
+        # but only execute execution_horizon actions starting from the current obs (last idx in obs_horizon)
         print(f"Device: {self.device}")
-        pred_horizon = self.action_horizon
         self.ema_nets.eval()
 
         # Reset environment with random peg and socket pose
+        # TODO: Initialize env with the same peg and socket pose as the training data
         peg_pose, socket_pose = act_utils.sample_insertion_pose()
         act_sim_env.BOX_POSE[0] = np.concatenate([peg_pose, socket_pose])
         ts = env.reset()
-        # TODO: Check if "angle" camera is the right one since training is done with "top" camera
-        onscreen_cam = "angle"
 
         # Init obs deque with initial observations
         # obs keys:'qpos', 'qvel', 'env_state', 'images'
@@ -157,10 +184,10 @@ class InferDiffusIn:
         obs = ts.observation
         obs_deque = collections.deque([obs] * self.obs_horizon, maxlen=self.obs_horizon)
 
+        frames = []
         if render:
-            imgs = [env._physics.render(height=480, width=640, camera_id=onscreen_cam)]
-        else:
-            imgs = []
+            frames.append(self._get_frame_from_env(ts))
+
         rewards = []
         done = False
         step_idx = 0
@@ -205,7 +232,7 @@ class InferDiffusIn:
                 with torch.no_grad():
                     # initialize action from Guassian noise
                     noisy_action = torch.randn(
-                        (B, pred_horizon, self.action_dim), device=self.device
+                        (B, self.pred_horizon, self.ema_nets.action_dim), device=self.device
                     )
                     naction = noisy_action
 
@@ -242,9 +269,9 @@ class InferDiffusIn:
                     self.visualize_actions(action_pred, save_path="data/local_debug/denoised_action.png")
                 
                 # only take execution_horizon number of actions
-                action = action_pred[
-                    : self.execution_horizon, :
-                ]  # (execution_horizon, action_dim)
+                start = self.obs_horizon - 1
+                end = start + self.execution_horizon
+                action = action_pred[start:end, :]  # (execution_horizon, action_dim)
 
                 # execute action_horizon number of steps
                 # without replanning
@@ -260,11 +287,7 @@ class InferDiffusIn:
                     rewards.append(reward)
 
                     if render:
-                        imgs.append(
-                            env._physics.render(
-                                height=480, width=640, camera_id=onscreen_cam
-                            )
-                        )
+                        frames.append(self._get_frame_from_env(ts))
 
                     # update progress bar
                     step_idx += 1
@@ -282,7 +305,10 @@ class InferDiffusIn:
 
         if render:
             # save vis as gif
-            imageio.mimsave(f"data/eval_vis_{self.checkpoint_name}.gif", imgs, fps=15)
+            save_path = f"{self.file_path}/eval_vis_{self.checkpoint_name}.gif"
+            # NOTE: The original hz is 50, but we set it to a custom value here.
+            imageio.mimsave(save_path, frames, fps=FPS, loop=0)  # loop=0 means infinite loop
+            print(f"Saved GIF to {save_path}")
 
     def visualize_actions(self, actions, save_path="action_visualization.png"):
         """Visualize action sequences as line plots for each action dimension"""
@@ -335,6 +361,10 @@ if __name__ == "__main__":
     parser.add_argument("--file_dir_path", type=str, required=True,
                         help="Path to the config.yaml file")
     parser.add_argument("--checkpoint_name", type=str, default=None,)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+                        help="Device to run the model on (default: cuda if available else cpu)")
+    parser.add_argument("--max_steps", type=int, default=500,
+                        help="Maximum number of steps to run in the environment")
     args = parser.parse_args()
-    evaluator = InferDiffusIn(file_path=args.file_dir_path, checkpoint_name=args.checkpoint_name)
-    evaluator.eval(env, max_steps=500, render=True)
+    evaluator = InferDiffusIn(file_path=args.file_dir_path, checkpoint_name=args.checkpoint_name, device=args.device)
+    evaluator.eval(env, max_steps=args.max_steps, render=True)

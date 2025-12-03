@@ -94,7 +94,8 @@ class ChunkedSequencesDataset(torch.utils.data.Dataset):
         self.camera_names = camera_names
         self.norm_stats = norm_stats
         self.is_sim = None
-        self.chunk_size = chunk_size
+        self.chunk_size = pred_horizon
+        self.obs_horizon = obs_horizon
         self.num_chunks = 0
         self.action_horizon = action_horizon
         self.multiview = True  # only top view for now
@@ -115,16 +116,14 @@ class ChunkedSequencesDataset(torch.utils.data.Dataset):
             with h5py.File(path, "r") as root:
                 episode_len = root["/action"].shape[0]
                 self.episode_lengths.append(episode_len)
-                num_full_chunks = (episode_len - self.action_horizon) // self.chunk_size
-                self.num_chunks += num_full_chunks
 
-        # Create random index mapping from chunk index to (episode index, start index)
+        # Create random index mapping (episode index, start index)
         self.index_mapping = []
         for ep_idx, ep_len in enumerate(self.episode_lengths):
-            num_full_chunks = (ep_len - self.action_horizon) // self.chunk_size
-            for chunk_idx in range(1, num_full_chunks):
-                start_idx = chunk_idx * self.chunk_size
-                self.index_mapping.append((ep_idx, start_idx))
+            num_full_chunks = ep_len - self.chunk_size + 1
+            self.num_chunks += num_full_chunks
+            for chunk_idx in range(num_full_chunks):
+                self.index_mapping.append((ep_idx, chunk_idx))
 
     def __len__(self):
         return len(self.index_mapping)
