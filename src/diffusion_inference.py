@@ -10,7 +10,7 @@ import yaml
 
 
 CAMERA_KEYS = ("top", "angle", "vis")  # available in env observations
-FPS = 20
+FPS = 50
 
 sys.path.extend(
     [
@@ -155,7 +155,7 @@ class InferDiffusIn:
         stacked = self._stack_vertical(imgs)
         return stacked
 
-    def eval(self, env, max_steps=500, render=False):  # default values taken from TRI example, should change
+    def eval(self, env, max_steps=500, render=True):  # default values taken from TRI example, should change
         """Evaluation Loop for Diffusion Model"""
 #         in training:
         # |o|o|o|o|o|o|o|o|                 pred_horizon: 8
