@@ -158,6 +158,29 @@ class InferDiffusIn:
         self.ema_nets.load_state_dict(checkpoint["model_state_dict"])
         print(f"Loaded model checkpoint from {checkpoint_path}")
 
+    def _get_insertion_pose(self):
+        # Peg
+        x_range = [0.1, 0.2]
+        y_range = [0.4, 0.6]
+        z_range = [0.05, 0.05]
+
+        peg_position = np.array([0.15, 0.5, 0.05]) # mid point
+
+        peg_quat = np.array([1, 0, 0, 0])
+        peg_pose = np.concatenate([peg_position, peg_quat])
+
+        # Socket
+        x_range = [-0.2, -0.1]
+        y_range = [0.4, 0.6]
+        z_range = [0.05, 0.05]
+
+        socket_position = np.array([-0.15, 0.5, 0.05]) # mid point
+
+        socket_quat = np.array([1, 0, 0, 0])
+        socket_pose = np.concatenate([socket_position, socket_quat])
+
+        return peg_pose, socket_pose
+
     def _capture_views(self, ts):
         """Capture frames from the environment observations"""
         obs_imgs = ts.observation["images"]
@@ -197,7 +220,8 @@ class InferDiffusIn:
 
         # Reset environment with random peg and socket pose
         # TODO: Initialize env with the same peg and socket pose as the training data
-        peg_pose, socket_pose = act_utils.sample_insertion_pose()
+        # peg_pose, socket_pose = act_utils.sample_insertion_pose()
+        peg_pose, socket_pose = self._get_insertion_pose()
         act_sim_env.BOX_POSE[0] = np.concatenate([peg_pose, socket_pose])
         ts = env.reset()
 
