@@ -487,7 +487,7 @@ if __name__ == "__main__":
     # Path arguments
     parser.add_argument("--dataset-path", type=str, default="data_recorded",
                        help="Path to dataset directory (default: data)")
-    parser.add_argument("--resume-dir", type=str, default=None,
+    parser.add_argument("--finetune-dir", type=str, default=None,
                        help="Path to an existing run directory to resume training from")
     
     # WandB arguments
@@ -510,9 +510,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Set up dirs and (optionally) resume from existing run
-    resume_dir = args.resume_dir
-    if resume_dir is not None:
-        files_output_path = Path(resume_dir).absolute()
+    finetune_dir = args.finetune_dir
+    if finetune_dir is not None:
+        files_output_path = Path(finetune_dir).absolute()
         dataset_path = files_output_path.parent
         print(f"Resuming training from {files_output_path}")
 
@@ -530,8 +530,8 @@ if __name__ == "__main__":
             args.batch_size = training_cfg.get("batch_size", args.batch_size)
             args.num_train_timesteps = training_cfg.get("num_train_timesteps", args.num_train_timesteps)
             args.ema_power = training_cfg.get("ema_power", args.ema_power)
-            args.vision_lr = training_cfg.get("vision_lr", args.vision_lr)
-            args.noise_predictor_lr = training_cfg.get("noise_predictor_lr", args.noise_predictor_lr)
+            args.vision_lr = training_cfg.get("vision_lr", args.vision_lr) * 0.1
+            args.noise_predictor_lr = training_cfg.get("noise_predictor_lr", args.noise_predictor_lr) * 0.1
             args.weight_decay = training_cfg.get("weight_decay", args.weight_decay)
             args.multiview = training_cfg.get("multiview", args.multiview)
 
@@ -632,7 +632,7 @@ if __name__ == "__main__":
 
     config_dict["dataset_stats"] = dataset_stats_serialized
     # Only save config when starting a new run (avoid overwriting when resuming)
-    if resume_dir is None:
+    if finetune_dir is None:
         save_config(config_dict, files_output_path)
 
     # Initialize WandB if tracking is enabled
@@ -685,7 +685,7 @@ if __name__ == "__main__":
     )
 
     # If resuming, load latest checkpoint (EMA model, optimizer, scheduler)
-    if resume_dir is not None:
+    if finetune_dir is not None:
         latest_ckpt = None
         resume_epoch_num = 0
         # Look for epoch checkpoints
@@ -713,8 +713,6 @@ if __name__ == "__main__":
             checkpoint = torch.load(str(latest_ckpt), map_location=device)
             trainer.model.load_state_dict(checkpoint["model_state_dict"])
             trainer.ema_nets.load_state_dict(checkpoint["model_state_dict"])
-            trainer.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            trainer.lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
             trainer.epoch = resume_epoch_num
         else:
             print(f"No checkpoint found in {files_output_path}, starting from scratch.")
