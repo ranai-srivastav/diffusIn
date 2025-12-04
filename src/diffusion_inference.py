@@ -92,6 +92,7 @@ class InferDiffusIn:
         self.obs_horizon = config["model"].get("observation_horizon", 2)
         self.stats = config.get("dataset_stats", None)
         self.debug = debug
+        self.multiview = config["training"].get("multiview", False)
         self.file_path = file_path
         if checkpoint_name is None:
             self.checkpoint_name = "last_diffusion_model_checkpoint.pth"
@@ -122,6 +123,7 @@ class InferDiffusIn:
             obs_horizon=self.obs_horizon,
             vision_encoder=self.vision_encoder,
             device=self.device,
+            multiview=self.multiview,
         )
     
         checkpoint_path = Path(file_path) / self.checkpoint_name
@@ -177,8 +179,9 @@ class InferDiffusIn:
         self.ema_nets.eval()
 
         # Reset environment with random peg and socket pose
-        # TODO: Initialize env with the same peg and socket pose as the training data
-        peg_pose, socket_pose = act_utils.sample_insertion_pose()
+        #peg_pose, socket_pose = act_utils.sample_insertion_pose()
+        # fixed poses
+        peg_pose, socket_pose = act_utils.get_insertion_pose()
         print("Peg Pose: ", peg_pose)
         print("Socket Pose: ", socket_pose)
         act_sim_env.BOX_POSE[0] = np.concatenate([peg_pose, socket_pose])
@@ -215,7 +218,14 @@ class InferDiffusIn:
 
                 B = 1
                 # stack the last obs_horizon number of observations
-                images = np.stack([x["images"]["top"] for x in obs_deque])
+                if self.multiview:
+                    image_top = np.stack([x["images"]["top"] for x in obs_deque])
+                    image_angle = np.stack([x["images"]["angle"] for x in obs_deque])
+                    image_vis = np.stack([x["images"]["vis"] for x in obs_deque])
+                    images = np.stack([image_top, image_angle, image_vis], axis=0)
+                    images = images.reshape((self.obs_horizon*3, *images.shape[-3:])) 
+                else:
+                    images = np.stack([x["images"]["top"] for x in obs_deque]) # (obs_horizon, h, w, c)
                 agent_poses = np.stack([x["qpos"] for x in obs_deque])
 
                 if self.debug:
