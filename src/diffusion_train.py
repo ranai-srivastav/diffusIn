@@ -182,7 +182,6 @@ class DiffusionModel(torch.nn.Module):
         # vision embedding shape (B, obs_horizon, D)
 
         # concatenate vision feature and agent positions
-        # TODO:Agent positions need to be raw inputs or embeddings?
         if self.multiview:
             pos_repeated = pos.repeat(1, 3, 1)  # B, obs_horizon, state_dim -> B, obs_horizon*3, state_dim
             obs_features = torch.cat([image_features, pos_repeated], dim=-1)  # D -> D + state_dim = obs_dim
@@ -305,6 +304,8 @@ class TrainDiffusIn:
 
         self.ema_nets = self.model
 
+        self.epoch = 0
+
     def training_step(self, batch):
         nimage = batch["image"]
         nagent_pos = batch["q_pos"]
@@ -401,6 +402,7 @@ class TrainDiffusIn:
                                     "train/epoch": epoch_idx,
                                 }
                             )
+                
 
                 t_global.set_postfix(loss=np.mean(epoch_loss))
                 if self.track_wandb:
@@ -416,15 +418,17 @@ class TrainDiffusIn:
                             "optimizer_state_dict": self.optimizer.state_dict(),
                             "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
                         },
-                        f"{self.files_output_path}/diffusion_model_checkpoint_e{epoch_idx}.pth",
+                        f"{self.files_output_path}/diffusion_model_checkpoint_e{self.epoch}.pth",
                     )
                     print(
-                        f"Saved last_model_checkpoint at {self.files_output_path}/diffusion_model_checkpoint_e{epoch_idx}.pth"
+                        f"Saved last_model_checkpoint at {self.files_output_path}/diffusion_model_checkpoint_e{self.epoch}.pth"
                     )
                     
                 if self.track_wandb:
                     for wandb_file in os.listdir(self.files_output_path):
                         wandb.save(f"{self.files_output_path}/{wandb_file}")
+
+                self.epoch += 1
 
         # Save last model checkpoint
         self.ema.copy_to(self.ema_nets.parameters())
@@ -483,6 +487,8 @@ if __name__ == "__main__":
     # Path arguments
     parser.add_argument("--dataset-path", type=str, default="data_recorded",
                        help="Path to dataset directory (default: data)")
+    parser.add_argument("--resume-dir", type=str, default=None,
+                       help="Path to an existing run directory to resume training from")
     
     # WandB arguments
     parser.add_argument("--no-track", action="store_true",
@@ -503,11 +509,47 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # Set up dirs
-    dataset_path = Path(args.dataset_path).absolute()
-    if not dataset_path.exists():
-        print(f"Warning: Dataset path {dataset_path} does not exist")
-    files_output_path = Path(dataset_path / f"diffusion_policy_models_{time.strftime('%Y%m%d_%H%M%S')}").absolute()
+    # Set up dirs and (optionally) resume from existing run
+    resume_dir = args.resume_dir
+    if resume_dir is not None:
+        files_output_path = Path(resume_dir).absolute()
+        dataset_path = files_output_path.parent
+        print(f"Resuming training from {files_output_path}")
+
+        # Load existing config.yaml if present and override args with saved config
+        config_path = files_output_path / "config.yaml"
+        if config_path.exists():
+            with open(config_path, "r") as f:
+                loaded_config = yaml.safe_load(f) or {}
+            training_cfg = loaded_config.get("training", {})
+            model_cfg = loaded_config.get("model", {})
+
+            # Override training args
+            args.num_epochs = training_cfg.get("num_epochs", args.num_epochs)
+            args.num_episodes = training_cfg.get("num_episodes", args.num_episodes)
+            args.batch_size = training_cfg.get("batch_size", args.batch_size)
+            args.num_train_timesteps = training_cfg.get("num_train_timesteps", args.num_train_timesteps)
+            args.ema_power = training_cfg.get("ema_power", args.ema_power)
+            args.vision_lr = training_cfg.get("vision_lr", args.vision_lr)
+            args.noise_predictor_lr = training_cfg.get("noise_predictor_lr", args.noise_predictor_lr)
+            args.weight_decay = training_cfg.get("weight_decay", args.weight_decay)
+            args.multiview = training_cfg.get("multiview", args.multiview)
+
+            # Override model args
+            args.vision_feature_dim = model_cfg.get("vision_feature_dim", getattr(args, "vision_feature_dim", None) or 192)
+            args.state_dim = model_cfg.get("state_dim", args.state_dim)
+            args.obs_horizon = model_cfg.get("observation_horizon", args.obs_horizon)
+            args.action_dim = model_cfg.get("action_dim", args.action_dim)
+            args.pred_horizon = model_cfg.get("pred_horizon", args.pred_horizon)
+            args.execution_horizon = model_cfg.get("execution_horizon", args.execution_horizon)
+            args.vision_encoder = model_cfg.get("vision_encoder", args.vision_encoder)
+        else:
+            print(f"Warning: config.yaml not found in {files_output_path}, using CLI/default arguments.")
+    else:
+        dataset_path = Path(args.dataset_path).absolute()
+        if not dataset_path.exists():
+            print(f"Warning: Dataset path {dataset_path} does not exist")
+        files_output_path = Path(dataset_path / f"diffusion_policy_models_{time.strftime('%Y%m%d_%H%M%S')}").absolute()
     
     DEBUG = args.debug
     
@@ -589,7 +631,9 @@ if __name__ == "__main__":
     }
 
     config_dict["dataset_stats"] = dataset_stats_serialized
-    save_config(config_dict, files_output_path)
+    # Only save config when starting a new run (avoid overwriting when resuming)
+    if resume_dir is None:
+        save_config(config_dict, files_output_path)
 
     # Initialize WandB if tracking is enabled
     if not args.no_track:
@@ -639,4 +683,40 @@ if __name__ == "__main__":
         files_output_path=files_output_path,
         debug=DEBUG,
     )
+
+    # If resuming, load latest checkpoint (EMA model, optimizer, scheduler)
+    if resume_dir is not None:
+        latest_ckpt = None
+        resume_epoch_num = 0
+        # Look for epoch checkpoints
+        ckpt_candidates = list(files_output_path.glob("diffusion_model_checkpoint_e*.pth"))
+        if ckpt_candidates:
+            def _get_epoch(p: Path) -> int:
+                stem = p.stem  # diffusion_model_checkpoint_e{epoch}
+                try:
+                    return int(stem.split("e")[-1])
+                except ValueError:
+                    return -1
+            ckpt_candidates = [p for p in ckpt_candidates if _get_epoch(p) >= 0]
+            if ckpt_candidates:
+                latest_ckpt = max(ckpt_candidates, key=_get_epoch)
+                resume_epoch_num = _get_epoch(latest_ckpt) + 1
+        # Fallback to last checkpoint
+        if latest_ckpt is None:
+            last_ckpt = files_output_path / "last_diffusion_model_checkpoint.pth"
+            if last_ckpt.exists():
+                latest_ckpt = last_ckpt
+                resume_epoch_num = 0
+
+        if latest_ckpt is not None:
+            print(f"Loading checkpoint from {latest_ckpt}")
+            checkpoint = torch.load(str(latest_ckpt), map_location=device)
+            trainer.model.load_state_dict(checkpoint["model_state_dict"])
+            trainer.ema_nets.load_state_dict(checkpoint["model_state_dict"])
+            trainer.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            trainer.lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
+            trainer.epoch = resume_epoch_num
+        else:
+            print(f"No checkpoint found in {files_output_path}, starting from scratch.")
+
     trainer.train()
