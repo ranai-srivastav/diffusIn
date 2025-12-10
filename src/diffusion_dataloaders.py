@@ -193,6 +193,7 @@ def get_norm_stats(dataset_dir, episode_ids):
     selected_episode_paths = [episode_paths[i] for i in episode_ids]
 
     for path in selected_episode_paths:
+        print(f"path: {path}")
         with h5py.File(path, "r") as root:
             qpos = np.array(root["/observations/qpos"])
             qvel = np.array(root["/observations/qvel"])

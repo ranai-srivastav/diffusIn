@@ -6,11 +6,12 @@
     "--init-hook",
     "import sys, os; p=os.environ.get('PYTHONPATH','');\n[sys.path.append(s) for s in p.split(os.pathsep) if s]"
   ],
-  "python.defaultInterpreterPath": "/home/stryder/miniconda3/envs/diffusin/bin/python",
+  "python.defaultInterpreterPath": "/home/student/anaconda3/envs/aloha/bin/python3",
   "python.analysis.extraPaths": [
     "${workspaceFolder}/include",
     "${workspaceFolder}/include/act",
     "${workspaceFolder}/include/diffusion_policy",
     "${workspaceFolder}/include/OpenVision/src"
   ],
+  "ju"
 }

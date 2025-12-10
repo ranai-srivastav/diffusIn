@@ -155,9 +155,8 @@ class DiffusionModel(torch.nn.Module):
 
         self.vision_encoder = vision_encoder
 
-        # TODO: What order does Conv!D exepect it in? Is it (B, C, L) or (B, L, C)?
         if multiview:
-            self.obs_feature_dim = obs_dim * obs_horizon * 3  # 3 views
+            self.obs_feature_dim = obs_dim * obs_horizon  # 192 dim vision feature x >>3 views<< x 2 obs horizon
         else:
             self.obs_feature_dim = obs_dim * obs_horizon
 
@@ -170,22 +169,27 @@ class DiffusionModel(torch.nn.Module):
     def forward(self, image, pos, noisy_actions, timesteps):
 
         # Generating vision embedding
+        B = image.shape[0]
         image_preproc = self.vision_encoder.preprocess(
             image
         )  # image preproc shape (B, obs_horizon, 3, 384, 384)
         image_features = self.vision_encoder(
             image_preproc.flatten(end_dim=1)
         )  # Shape of image features: B * obs_horizon, D
-        image_features = image_features.reshape(
-            *image_preproc.shape[:2], -1
-        )  # Shape of image features flattened: B, obs_horizon, D
+        image_features = image_features.unflatten(0, [*image_preproc.shape[:2]]
+        )  # Shape of image features flattened: B, obs_horizon*3, D
         # vision embedding shape (B, obs_horizon, D)
 
         # concatenate vision feature and agent positions
         # TODO:Agent positions need to be raw inputs or embeddings?
         if self.multiview:
-            pos_repeated = pos.repeat(1, 3, 1)  # B, obs_horizon, state_dim -> B, obs_horizon*3, state_dim
-            obs_features = torch.cat([image_features, pos_repeated], dim=-1)  # D -> D + state_dim = obs_dim
+            # pos_repeated = pos.repeat(1, 3, 1)  # B, obs_horizon, state_dim -> B, obs_horizon*3, state_dim
+            # obs_features = torch.cat([image_features, pos_repeated], dim=-1)  # D -> D + state_dim = obs_dim
+            # obs_cond = obs_features.flatten(start_dim=1)
+            image_features = image_features.reshape(B, self.obs_horizon, 3, -1) # B, obs_horizon, num_views, D
+            image_fused = image_features.mean(dim=2) # B, obs_horizon, D
+
+            obs_features = torch.cat([image_fused, pos], dim=-1)
             obs_cond = obs_features.flatten(start_dim=1)
         else:
             obs_features = torch.cat([image_features, pos], dim=-1)  # D -> D + state_dim = obs_dim
@@ -312,12 +316,14 @@ class TrainDiffusIn:
         B = naction.shape[0]
 
         # generate global conditioning vector
-        # Vision encoder input needs to be B, obs_horizon, 3, 384, 384
+        # Vision encoder input needs to be B, obs_horizon, 3, 384, 384 # NOTE: NIT incorrect. im_h, im_w coming in till this point are OG img dims
         if self.multiview:
             # B, 3 (num views), obs_horizon, 3 (channels), 384, 384 ->
             # B, [top1, top2, angle1, angle2, vis1, vis2], 3, 384, 384
-            this_nimage = nimage.reshape(B, self.obs_horizon*3, *nimage.shape[-3:])
-            this_nimage = this_nimage[:, :self.obs_horizon*3,...]
+            this_nimage = nimage.flatten(start_dim=1, # nimage.shape = (B, >>numView=3, obs_horizon=2<<, numChannel=3, im_h, im_w) gets 
+                                         end_dim=2)   # concatenated in row_major form with the first index being the outer index so V0O0 V0O1 V1O0 V1O1....     
+
+            # this_nimage = this_nimage[:, :self.obs_horizon*3,...] # TODO: Why Necessary
         else:
             this_nimage = nimage[:, :self.obs_horizon,...]
         this_nagent_pos = nagent_pos[:, :self.obs_horizon,...]
@@ -416,10 +422,10 @@ class TrainDiffusIn:
                             "optimizer_state_dict": self.optimizer.state_dict(),
                             "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
                         },
-                        f"{self.files_output_path}/diffusion_model_checkpoint_e{epoch_idx}.pth",
+                        f"{self.files_output_path}/diffusion_model_checkpoint_latest.pth",
                     )
                     print(
-                        f"Saved last_model_checkpoint at {self.files_output_path}/diffusion_model_checkpoint_e{epoch_idx}.pth"
+                        f"Saved last_model_checkpoint at {self.files_output_path}/diffusion_model_checkpoint_latest.pth"
                     )
                     
                 if self.track_wandb:
@@ -564,7 +570,7 @@ if __name__ == "__main__":
         multiview=args.multiview,
     )
 
-    model.to(device=device)
+    model = model.to(device=device)
     print("Initialized Diffusion Model:")
     # print(model)
     
