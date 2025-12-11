@@ -140,6 +140,7 @@ class DiffusionModel(torch.nn.Module):
         state_dim,
         obs_dim,
         action_dim,
+        pos_dim,
         obs_horizon,
         vision_encoder: VisionEncoder,
         device,
@@ -149,16 +150,14 @@ class DiffusionModel(torch.nn.Module):
         self.state_dim = state_dim
         self.obs_dim = obs_dim
         self.action_dim = action_dim
+        self.pos_dim = pos_dim
         self.obs_horizon = obs_horizon
         self.device = device
         self.multiview = multiview
 
         self.vision_encoder = vision_encoder
-
-        if multiview:
-            self.obs_feature_dim = obs_dim * obs_horizon  # 192 dim vision feature x >>3 views<< x 2 obs horizon
-        else:
-            self.obs_feature_dim = obs_dim * obs_horizon
+        self.obs_feature_dim = obs_dim * obs_horizon
+        self.pos_projector = torch.nn.Linear(state_dim, self.pos_dim)
 
         self.noise_predictor = ConditionalUnet1D(
             action_dim=action_dim, global_cond_dim=self.obs_feature_dim
@@ -179,7 +178,8 @@ class DiffusionModel(torch.nn.Module):
         image_features = image_features.unflatten(0, [*image_preproc.shape[:2]]
         )  # Shape of image features flattened: B, obs_horizon*3, D
         # vision embedding shape (B, obs_horizon, D)
-
+        # B, Obs_horizon, state_dim -> B, Obs_horizon, pos_dim
+        pos = self.pos_projector(pos)
         # concatenate vision feature and agent positions
         # TODO:Agent positions need to be raw inputs or embeddings?
         if self.multiview:
@@ -553,6 +553,8 @@ if __name__ == "__main__":
     # Model arguments
     parser.add_argument("--state-dim", type=int, default=14,
                        help="State dimension (default: 14)")
+    parser.add_argument("--position-projection-dim", type=int, default=64,
+                       help="Dimension of projected agent state (default: 64)")
     parser.add_argument("--action-dim", type=int, default=14,
                        help="Action dimension (default: 14)")
     parser.add_argument("--pred-horizon", type=int, default=8,
@@ -611,7 +613,7 @@ if __name__ == "__main__":
         args.vision_feature_dim = 192
 
     # Compute observation_dim from vision_feature_dim + state_dim
-    args.observation_dim = args.vision_feature_dim + args.state_dim
+    args.observation_dim = args.vision_feature_dim + args.position_projection_dim
 
     # Prepare base configuration (we will save after loading dataset stats)
     config_dict = {
@@ -632,6 +634,7 @@ if __name__ == "__main__":
             "observation_horizon": args.obs_horizon,
             "observation_dim": args.observation_dim,
             "action_dim": args.action_dim,
+            "position_projection_dim": args.position_projection_dim,
             "pred_horizon": args.pred_horizon,
             "execution_horizon": args.execution_horizon,
             "vision_encoder": args.vision_encoder,
@@ -643,6 +646,7 @@ if __name__ == "__main__":
         state_dim=args.state_dim,
         obs_dim=args.observation_dim,
         action_dim=args.action_dim,
+        pos_dim=args.position_projection_dim,
         obs_horizon=args.obs_horizon,
         vision_encoder=vision_encoder,
         device=device,
