@@ -310,6 +310,7 @@ class TrainDiffusIn:
         self.ema_nets = self.model
 
     def training_step(self, batch):
+        self.model.train()
         nimage = batch["image"]
         nagent_pos = batch["q_pos"]
         naction = batch["action"] # B x pred_horizon x action_dim
@@ -365,7 +366,41 @@ class TrainDiffusIn:
         loss = loss.mean()
         return loss
 
+    def eval_step(self, batch):
+        self.model.eval()
+        with torch.no_grad():
+            nimage = batch["image"]
+            nagent_pos = batch["q_pos"]
+            naction = batch["action"]  # B x pred_horizon x action_dim
+            B = naction.shape[0]
 
+            # generate global conditioning vector
+            if self.multiview:
+                this_nimage = nimage.flatten(start_dim=1, end_dim=2)
+            else:
+                this_nimage = nimage[:, :self.obs_horizon, ...]
+
+            this_nagent_pos = nagent_pos[:, :self.obs_horizon, ...]
+
+            # sample a diffusion iteration for each data point
+            timesteps = torch.randint(
+                low=0,
+                high=self.noise_scheduler.config["num_train_timesteps"],
+                size=(B,),
+                device=self.device,
+            ).long()
+
+            # predict the noise
+            noise_pred = self.ema_nets(
+                this_nimage, this_nagent_pos, naction, timesteps
+            )
+
+            val_loss = self.loss_fn(noise_pred, naction)
+            val_loss = reduce(val_loss, 'b ... -> b (...)', 'mean')
+            val_loss = val_loss.mean()
+            return val_loss
+
+        
     def train(self):
         """Training Loop for Diffusion Model"""
         gc.collect()
@@ -375,8 +410,11 @@ class TrainDiffusIn:
         print(f"Training for {self.num_epochs} epochs with batch size {self.train_dataloader.batch_size}")
         with tqdm(range(self.num_epochs), desc="Epoch") as t_global:
             # epoch loop
+            best_val_loss = float('inf')
+
             for epoch_idx in t_global:
                 epoch_loss = list()
+
                 # batch loop
                 with tqdm(self.train_dataloader, desc="Batch", leave=False) as t_epoch:
                     for nbatch in t_epoch:
@@ -407,12 +445,36 @@ class TrainDiffusIn:
                                     "train/epoch": epoch_idx,
                                 }
                             )
-
+                # save epoch loss
                 t_global.set_postfix(loss=np.mean(epoch_loss))
                 if self.track_wandb:
                     wandb.log({"train/epoch_loss": np.mean(epoch_loss)})
 
+                # Validation loop
+                with tqdm(self.val_dataloader, desc="Val Batch", leave=False) as t_val:
+                    val_epoch_loss = []
+                    for val_batch in t_val:
+                        # move batch to device
+                        val_batch = dict_apply(val_batch, lambda x: x.to(self.device, non_blocking=True))
+                        val_loss = self.eval_step(val_batch)
+
+                        val_loss_cpu = val_loss.item()
+                        t_val.set_postfix(val_loss=val_loss_cpu)
+                        if self.track_wandb:
+                            wandb.log(
+                                {
+                                    "val/loss": val_loss_cpu,
+                                    "val/epoch": epoch_idx,
+                                }
+                            )
+                        
+                        val_epoch_loss.append(val_loss_cpu)
                 
+                # Log val loss for epoch
+                if self.track_wandb:
+                    wandb.log({"val/epoch_loss": np.mean(val_epoch_loss)})
+
+                # Save model every N epochs
                 if (epoch_idx+1) % self.save_every == 0:
                     # Save this model
                     self.ema.copy_to(self.ema_nets.parameters())
@@ -427,7 +489,24 @@ class TrainDiffusIn:
                     print(
                         f"Saved last_model_checkpoint at {self.files_output_path}/diffusion_model_checkpoint_latest.pth"
                     )
-                    
+                
+                # Save best model according to epoch val loss
+                if np.mean(val_epoch_loss) < best_val_loss:
+                    best_val_loss = np.mean(val_epoch_loss)
+                    self.ema.copy_to(self.ema_nets.parameters())
+                    torch.save(
+                        {
+                            "model_state_dict": self.ema_nets.state_dict(),
+                            "optimizer_state_dict": self.optimizer.state_dict(),
+                            "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
+                        },
+                        f"{self.files_output_path}/best_diffusion_model_checkpoint.pth",
+                    )
+                    print(
+                        f"Saved best_model_checkpoint at {self.files_output_path}/best_diffusion_model_checkpoint.pth"
+                    )
+
+                # Save all pth file to wandb
                 if self.track_wandb:
                     for wandb_file in os.listdir(self.files_output_path):
                         wandb.save(f"{self.files_output_path}/{wandb_file}")

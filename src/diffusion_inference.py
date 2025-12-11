@@ -232,8 +232,7 @@ class InferDiffusIn:
                     # Visualize current images in obs_deque
                     for i, x in enumerate(obs_deque):
                         os.makedirs("data/local_debug", exist_ok=True)
-                        Image.fromarray(x["images"]["top"]).save(f"data/local_debug/obs_deque_current_{i}.png")
-                    
+                        Image.fromarray(x["images"]["top"]).save(f"data/local_debug/obs_deque_current_{i}.png")  
 
                 # normalize observation
                 nagent_poses = (agent_poses - self.stats["qpos_mean"]) / self.stats[

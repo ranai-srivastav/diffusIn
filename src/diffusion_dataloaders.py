@@ -390,7 +390,7 @@ def load_chunked_data(
     assert (num_episodes > 1), "num_episodes must be greater than 1 to perform train/val split."
     
     train_dataset = ChunkedSequencesDataset(train_indices, dataset_dir, camera_names, norm_stats, pred_horizon, obs_horizon, multiview=multiview)
-    val_dataset = ChunkedSequencesDataset(val_indices, dataset_dir, camera_names, norm_stats, pred_horizon, obs_horizon)
+    val_dataset = ChunkedSequencesDataset(val_indices, dataset_dir, camera_names, norm_stats, pred_horizon, obs_horizon, multiview=multiview)
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=batch_size_train,
