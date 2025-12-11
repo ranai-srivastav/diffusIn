@@ -106,7 +106,7 @@ class ResNet18Encoder(VisionEncoder):
     def preprocess(self, raw_image: Image.Image):
         # raw_image = raw_image.convert("RGB")
         image = self.processor(raw_image)
-        return image.unsqueeze(0)  # Add batch dimension
+        return image  # Add batch dimension
 
     def forward(self, image):
         return self.model(image)
